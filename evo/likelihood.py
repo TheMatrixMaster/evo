@@ -1,17 +1,16 @@
-from tqdm import tqdm
+from functools import partial
+from typing import List, Optional, Sequence, Union
+
+import esm
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-import numpy as np
-import esm
-from typing import Union, List, Sequence, Optional, Tuple
-from functools import partial
-import pandas as pd
+from tqdm import tqdm
 
-
-from .tokenization import Vocab
-from .tensor import batched_iterator
 from .align import MSA
-
+from .tensor import batched_iterator
+from .tokenization import Vocab
 
 IntSeq = Union[Sequence[int], np.ndarray, torch.Tensor]
 
@@ -42,11 +41,10 @@ def sequence_logits(
     sequence: Union[str, MSA],
     verbose: bool = False,
     mask_positions: bool = True,
-    max_tokens: int = 2 ** 14,
+    max_tokens: int = 2**14,
     indices: Optional[IntSeq] = None,
     parallel: bool = False,
 ) -> torch.Tensor:
-
     device = next(model.parameters()).device
     tokens = torch.from_numpy(vocab.encode(sequence)).to(device)
     if parallel and torch.cuda.device_count() > 1:
@@ -87,7 +85,7 @@ def sequence_mutant_scores(
     sequence: Union[str, MSA],
     verbose: bool = False,
     mask_positions: bool = True,
-    max_tokens: int = 2 ** 14,
+    max_tokens: int = 2**14,
     indices: Optional[IntSeq] = None,
     parallel: bool = False,
 ) -> pd.DataFrame:
@@ -142,11 +140,10 @@ def sequence_pseudo_ppl(
     sequence: str,
     mask_positions: bool = True,
     verbose: bool = False,
-    max_tokens: int = 2 ** 14,
+    max_tokens: int = 2**14,
     reduction: str = "mean",
     log: bool = False,
 ) -> float:
-
     device = next(model.parameters()).device
     tokens = torch.from_numpy(vocab.encode(sequence)).to(device)
     start = int(vocab.prepend_bos)
@@ -176,7 +173,7 @@ def pseudo_ppl(
     alphabet_or_vocab: Union[esm.data.Alphabet, Vocab],
     sequences: List[str],
     mask_positions: bool = True,
-    max_tokens: int = 2 ** 14,
+    max_tokens: int = 2**14,
     log: bool = False,
 ):
     if not isinstance(alphabet_or_vocab, Vocab):

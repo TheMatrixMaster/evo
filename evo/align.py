@@ -1,17 +1,19 @@
-from typing import List, Tuple, Union, Iterator, Sequence, TextIO
-from copy import copy
 import contextlib
 import math
-import tempfile
 import re
-from pathlib import Path
 import subprocess
+import tempfile
+from copy import copy
+from pathlib import Path
+from typing import Iterator, List, Sequence, TextIO, Tuple, Union
+
 import numpy as np
-from scipy.spatial.distance import squareform, pdist, cdist
 from Bio import SeqIO
 from Bio.Seq import Seq
+from scipy.spatial.distance import cdist, pdist, squareform
+from tqdm import tqdm
+
 from .typed import PathLike
-from .tensor import apc
 
 
 class MSA:
@@ -25,15 +27,11 @@ class MSA:
         self.headers = [header for header, _ in sequences]
         self.sequences = [seq for _, seq in sequences]
         self._seqlen = len(self.sequences[0])
-        assert all(
-            len(seq) == self._seqlen for seq in self.sequences
-        ), "Seqlen Mismatch!"
+        assert all(len(seq) == self._seqlen for seq in self.sequences), "Seqlen Mismatch!"
 
         self._depth = len(self.sequences)
         self.seqid_cutoff = seqid_cutoff
-        self.is_nucleotide = all(
-            re.match(r"(A|C|T|G|U|-)*", seq) for seq in self.sequences
-        )
+        self.is_nucleotide = all(re.match(r"(A|C|T|G|U|-)*", seq) for seq in self.sequences)
 
     def __iter__(self) -> Iterator[Tuple[str, str]]:
         return zip(self.headers, self.sequences)
@@ -44,9 +42,7 @@ class MSA:
             data = [(self.headers[idx], self.sequences[idx]) for idx in indices]
             return self.__class__(data)
         else:
-            data = [
-                (header, "".join(seq[idx] for idx in indices)) for header, seq in self
-            ]
+            data = [(header, "".join(seq[idx] for idx in indices)) for header, seq in self]
             return self.__class__(data)
 
     def swap(self, index1: int, index2: int) -> "MSA":
@@ -73,20 +69,18 @@ class MSA:
         qid: int = 0,
         qsc: float = -20.0,
         binary: str = "hhfilter",
+        file_ext: str = "a3m",
     ) -> "MSA":
-
-        with tempfile.TemporaryDirectory(dir="/dev/shm") as tempdirname:
+        with tempfile.TemporaryDirectory(dir="/tmp") as tempdirname:
             tempdir = Path(tempdirname)
             fasta_file = tempdir / "input.fasta"
-            fasta_file.write_text(
-                "\n".join(f">{i}\n{seq}" for i, seq in enumerate(self.sequences))
-            )
+            fasta_file.write_text("\n".join(f">{i}\n{seq}" for i, seq in enumerate(self.sequences)))
             output_file = tempdir / "output.fasta"
             command = " ".join(
                 [
                     f"{binary}",
                     f"-i {fasta_file}",
-                    "-M a3m",
+                    f"-M {file_ext}",
                     f"-o {output_file}",
                     f"-id {seqid}",
                     f"-diff {diff}",
@@ -136,7 +130,7 @@ class MSA:
         all_indices = np.arange(self.depth)
         indices = [0]
         pairwise_distances = np.zeros((0, self.depth))
-        for _ in range(num_seqs - 1):
+        for _ in tqdm(range(num_seqs - 1)):
             dist = cdist(self.array[indices[-1:]], self.array, "hamming")
             pairwise_distances = np.concatenate([pairwise_distances, dist])
             shifted_distance = np.delete(pairwise_distances, indices, axis=1).mean(0)
@@ -152,23 +146,18 @@ class MSA:
             return self
         weights = self.weights[1:]
         weights = weights / weights.sum()
-        indices = (
-            np.random.choice(
-                self.depth - 1, size=num_seqs - 1, replace=False, p=weights
-            )
-            + 1
-        )
+        indices = np.random.choice(self.depth - 1, size=num_seqs - 1, replace=False, p=weights) + 1
         indices = np.sort(indices)
         indices = np.append(0, indices)
         return self.select(indices, axis="seqs")
 
-    def select_diverse(self, num_seqs: int, method: str = "hhfilter") -> "MSA":
+    def select_diverse(self, num_seqs: int, method: str = "hhfilter", **kwargs) -> "MSA":
         assert method in ("hhfilter", "sample-weights")
         if num_seqs >= self.depth:
             return self
 
         if method == "hhfilter":
-            msa = self.hhfilter(diff=num_seqs)
+            msa = self.hhfilter(diff=num_seqs, **kwargs)
             if num_seqs < msa.depth:
                 msa = msa.select(np.arange(num_seqs))
         else:
@@ -178,9 +167,15 @@ class MSA:
     def invcov(self) -> np.ndarray:
         """given one-hot encoded MSA, return contacts"""
         from sklearn.preprocessing import OneHotEncoder
+
         dtype = self.dtype
         self.dtype = np.uint8
-        Y = OneHotEncoder(drop=[self.gap]).fit_transform(self.array.reshape(-1, 1)).toarray().reshape(self.depth, self.seqlen, -1)
+        Y = (
+            OneHotEncoder(drop=[self.gap])
+            .fit_transform(self.array.reshape(-1, 1))
+            .toarray()
+            .reshape(self.depth, self.seqlen, -1)
+        )
         K = Y.shape[-1]
         Y_flat = Y.reshape(self.depth, -1)
         c = np.cov(Y_flat.T)
@@ -270,7 +265,6 @@ class MSA:
         keep_insertions: bool = False,
         **kwargs,
     ) -> "MSA":
-
         output = []
         valid_indices = None
         for record in SeqIO.parse(stofile, "stockholm"):
@@ -292,7 +286,6 @@ class MSA:
         remove_lowercase_cols: bool = False,
         **kwargs,
     ) -> "MSA":
-
         output = []
         valid_indices = None
         for record in SeqIO.parse(fasfile, "fasta"):

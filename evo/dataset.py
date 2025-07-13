@@ -1,7 +1,6 @@
 import math
 import subprocess
 import threading
-from abc import ABC, abstractmethod
 from operator import methodcaller
 from pathlib import Path
 from typing import (
@@ -19,6 +18,7 @@ from typing import (
 
 import numba
 import numpy as np
+import pyarrow.parquet as pq
 import torch
 import torch.distributed as dist
 from Bio import SeqIO
@@ -214,7 +214,7 @@ class NPZDataset(torch.utils.data.Dataset):
         return item
 
 
-class MSADataset(torch.utils.data.Dataset, ABC):
+class MSADataset(torch.utils.data.Dataset):
     """Creates a dataset from a directory of a2m/a3m files.
     Args:
         file_ext (str): File ext to use, either 'a2m' or 'a3m'.
@@ -256,6 +256,7 @@ class MSADataset(torch.utils.data.Dataset, ABC):
         if len(file_list) == 0:
             raise FileNotFoundError(f"No .{file_ext} files found in {data_file}")
 
+        self.file_ext = file_ext
         self._file_list = sorted(file_list)
         self.keys = {f.stem: i for i, f in enumerate(self._file_list)}
         self._max_seqs_per_msa = max_seqs_per_msa
@@ -268,9 +269,22 @@ class MSADataset(torch.utils.data.Dataset, ABC):
     def key(self, index: int) -> str:
         return self._file_list[index].stem
 
-    @abstractmethod
     def read_msa(self, index: int) -> MSA:
-        raise NotImplementedError("Must implement read_msa method")
+        if self.file_ext == "a3m":
+            return MSA.from_fasta(
+                self._file_list[index],
+                keep_insertions=False,
+                uppercase=False,
+                remove_lowercase_cols=False,
+            )
+        elif self.file_ext == "a2m":
+            return MSA.from_fasta(
+                self._file_list[index],
+                keep_insertions=True,
+                uppercase=True,
+                remove_lowercase_cols=False,
+            )
+        raise ValueError(f"Unknown file extension: {self.file_ext}")
 
     def __len__(self) -> int:
         return len(self._file_list)
@@ -282,57 +296,76 @@ class MSADataset(torch.utils.data.Dataset, ABC):
             seq = str(next(SeqIO.parse(self._file_list[index], "fasta")).seq)
             return seq
         else:
-            # msa = MSA.from_fasta(self._file_list[index])
             msa = self.read_msa(index)
             if self._max_seqs_per_msa is not None:
-                msa = msa.select_diverse(self._max_seqs_per_msa, method=self._sample_method)
+                msa = msa.select_diverse(
+                    self._max_seqs_per_msa,
+                    method=self._sample_method,
+                    file_ext=self.file_ext,
+                )
             return msa
 
 
-class A3MDataset(MSADataset):
-    """Reads A3M files from a directory (removes insertions and gaps)"""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(file_ext="a3m", *args, **kwargs)
-
-    def read_msa(self, index):
-        return MSA.from_fasta(
-            self._file_list[index],
-            keep_insertions=False,
-            uppercase=False,
-            remove_lowercase_cols=False,
-        )
-
-
-class A2MDataset(MSADataset):
-    """Reads A2M files from a directory (keeps insertions and gaps)"""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(file_ext="a2m", *args, **kwargs)
-
-    def read_msa(self, index):
-        return MSA.from_fasta(
-            self._file_list[index],
-            keep_insertions=True,
-            uppercase=True,
-            remove_lowercase_cols=False,
-        )
-
-
-class EncodedA3MDataset(CollatableVocabDataset, A3MDataset):
+class EncodedMSADataset(CollatableVocabDataset, MSADataset):
     def __init__(self, vocab: Vocab, *args, **kwargs):
         super().__init__(vocab=vocab, *args, **kwargs)
 
     def __getitem__(self, idx):
-        return self.vocab.encode(super().__getitem__(idx))
+        return torch.from_numpy(self.vocab.encode(super().__getitem__(idx)))
 
 
-class EncodedA2MDataset(CollatableVocabDataset, A2MDataset):
-    def __init__(self, vocab: Vocab, *args, **kwargs):
-        super().__init__(vocab=vocab, *args, **kwargs)
+class ParquetDataset(torch.utils.data.Dataset):
+    """Creates a dataset from a parquet file."""
 
-    def __getitem__(self, idx):
-        return self.vocab.encode(super().__getitem__(idx))
+    def __init__(
+        self,
+        data_file: PathLike,
+        sequence_col: str = "sequence",
+        prop_cols: List[str] = [],
+    ):
+        self.data_file = data_file
+        self.table = pq.read_table(self.data_file)
+        self.sequences = self.table.column(sequence_col).to_pylist()
+        self.properties = {col: self.table.column(col).to_pylist() for col in prop_cols}
+        self.sequence_col = sequence_col
+        self.prop_cols = prop_cols
+
+    def __len__(self) -> int:
+        return len(self.sequences)
+
+    def __getitem__(self, index: int):
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        sequence = self.sequences[index]
+        properties = {k: v[index] for k, v in self.properties.items()}
+        return properties, sequence
+
+
+class EncodedParquetDataset(CollatableVocabDataset, ParquetDataset):
+    def __init__(self, vocab, *args, **kwargs):
+        super().__init__(vocab, *args, **kwargs)
+
+    def __getitem__(self, index):
+        properties, sequence = super().__getitem__(index)
+        sequence = torch.from_numpy(self.vocab.encode_single_sequence(sequence))
+        return {"sequence": sequence} | properties
+
+    @property
+    def batch_keys(self):
+        return [self.sequence_col] + self.prop_cols
+
+    def collater(self, batch):
+        col_batch = {}
+        for key in self.batch_keys:
+            if isinstance(batch[0][key], (float, int)):
+                col_batch[key] = torch.tensor([item[key] for item in batch])
+            elif isinstance(batch[0][key], (np.ndarray, torch.Tensor)):
+                col_batch[key] = collate_tensors(
+                    [item[key] for item in batch], constant_value=self.vocab.pad_idx
+                )
+            else:
+                col_batch[key] = [item[key] for item in batch]
+        return col_batch
 
 
 class FastaDataset(SizedDataset):
@@ -406,7 +439,7 @@ class EncodedFastaDataset(CollatableVocabDataset, FastaDataset):
         return torch.from_numpy(self.vocab.encode_single_sequence(seq))
 
 
-class EncodedLargeMSADataset(CollatableVocabDataset):
+class EncodedIndexedMSADataset(CollatableVocabDataset):
     def __init__(self, ffindex_path: PathLike, vocab: Vocab):
         super().__init__(vocab)
 
@@ -650,7 +683,8 @@ class RandomCropDataset(BaseWrapperDataset):
         self.max_seqlen = max_seqlen
         self.num_special = int(self.vocab.prepend_bos) + int(self.vocab.append_eos)
         self.max_seqlen_no_special = self.max_seqlen - self.num_special
-        self.sizes = np.minimum(self.sizes, max_seqlen)  # type: ignore
+        if isinstance(self.dataset, SizedDataset):
+            self.sizes = np.minimum(self.sizes, max_seqlen)  # type: ignore
 
     def __getitem__(self, idx):
         item = self.dataset[idx]

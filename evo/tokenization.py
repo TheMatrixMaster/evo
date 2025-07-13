@@ -1,13 +1,15 @@
-from typing import Dict, Optional, Union, Sequence
-import torch
-import tape
-import transformers
-import numpy as np
-import esm
-from copy import copy
-import logging
-from .align import MSA
 import itertools
+import logging
+from copy import copy
+from typing import Dict, Optional, Sequence, Union
+
+import esm
+import numpy as np
+import tape
+import torch
+import transformers
+
+from .align import MSA
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +26,9 @@ class Vocab(object):
         prepend_bos: bool = True,
         append_eos: bool = True,
     ):
-        if prepend_bos and bos_token not in tokens:
+        if bos_token is not None and bos_token not in tokens:
             raise KeyError(f"bos token '{bos_token}' not in input tokens.")
-        if append_eos and eos_token not in tokens:
+        if eos_token is not None and eos_token not in tokens:
             raise KeyError(f"eos token '{eos_token}' not in input tokens.")
         if unk_token is not None and unk_token not in tokens:
             raise KeyError(f"unk token '{unk_token}' not in input tokens.")
@@ -50,13 +52,14 @@ class Vocab(object):
         self.prepend_bos = prepend_bos
         self.append_eos = append_eos
 
-        if prepend_bos:
+        if bos_token is not None:
             self.bos_token: Optional[str] = bos_token
             self.bos_idx = tokens[bos_token]
         else:
             self.bos_token = None
             self.bos_idx = -1
-        if append_eos:
+
+        if eos_token is not None:
             self.eos_token: Optional[str] = eos_token
             self.eos_idx = tokens[eos_token]
         else:
@@ -80,9 +83,7 @@ class Vocab(object):
             self.mask_idx = tokens[mask_token]
 
         self.uint8_symbols = np.sort(
-            np.array([tok for tok in self.tokens if len(tok) == 1], dtype="|S1").view(
-                np.uint8
-            )
+            np.array([tok for tok in self.tokens if len(tok) == 1], dtype="|S1").view(np.uint8)
         )
         self.numpy_indices = np.array(
             [self.index(chr(tok)) for tok in self.uint8_symbols],
@@ -116,9 +117,7 @@ class Vocab(object):
         return indices
 
     def add_special_tokens(self, array: np.ndarray) -> np.ndarray:
-        pad_widths = [(0, 0)] * (array.ndim - 1) + [
-            (int(self.prepend_bos), int(self.append_eos))
-        ]
+        pad_widths = [(0, 0)] * (array.ndim - 1) + [(int(self.prepend_bos), int(self.append_eos))]
         return np.pad(
             array,
             pad_widths,
@@ -135,9 +134,7 @@ class Vocab(object):
         batch_size = len(sequences)
         max_seqlen = max(len(seq) for seq in sequences)
         extra_token_pad = int(self.prepend_bos) + int(self.append_eos)
-        indices = np.full(
-            (batch_size, max_seqlen + extra_token_pad), fill_value=self.pad_idx
-        )
+        indices = np.full((batch_size, max_seqlen + extra_token_pad), fill_value=self.pad_idx)
 
         for i, seq in enumerate(sequences):
             encoded = self.encode_single_sequence(seq)
@@ -178,9 +175,7 @@ class Vocab(object):
             raise TypeError(f"Unknown input type {type(inputs)}")
         return not bool(tokens - set(self.tokens))
 
-    def decode(
-        self, tokens: Union[np.ndarray, torch.Tensor]
-    ) -> Union[str, Sequence[str]]:
+    def decode(self, tokens: Union[np.ndarray, torch.Tensor]) -> Union[str, Sequence[str]]:
         if isinstance(tokens, torch.Tensor):
             tokens = tokens.cpu().numpy()
 
@@ -247,17 +242,13 @@ class Vocab(object):
     def from_fasta_standard(cls) -> "Vocab":
         alphabet = "ARNDCQEGHILKMFPSTWYV-X"
         a2n = {a: n for n, a in enumerate(alphabet)}
-        return cls(
-            a2n, pad_token="-", prepend_bos=False, append_eos=False, unk_token="X"
-        )
+        return cls(a2n, pad_token="-", prepend_bos=False, append_eos=False, unk_token="X")
 
     @classmethod
     def from_trrosetta(cls) -> "Vocab":
         alphabet = "ARNDCQEGHILKMFPSTWYV-"
         a2n = {a: n for n, a in enumerate(alphabet)}
-        return cls(
-            a2n, pad_token="-", prepend_bos=False, append_eos=False, unk_token="-"
-        )
+        return cls(a2n, pad_token="-", prepend_bos=False, append_eos=False, unk_token="-")
 
 
 def test_encode_sequence():
