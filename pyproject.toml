@@ -1,0 +1,35 @@
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 100
+include = '\.pyi?$'
+
+[tool.mypy]
+python_version = 3.10
+ignore_missing_imports = true
+
+[tool.poetry]
+name = "evo"
+version = "0.0.1"
+description = "A monorepo for protein utilities"
+authors = ["Stephen Z. Lu <stephen.lu@berkeley.edu>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+pandas = "*"
+numpy = "*"
+tqdm = "*"
+biopython = "*"
+numba = "*"
+matplotlib = "*"
+transformers = "*"
+tape-proteins = { git = "https://github.com/songlab-cal/tape", branch = "master" }
+fair-esm = { git = "https://github.com/facebookresearch/esm", branch = "main" }
+
+# --------- Development Tools --------- #
+rich = "*"
+rootutils = "*"
+pre-commit = "^3.5.0"
+pytest = "^7.4.2"

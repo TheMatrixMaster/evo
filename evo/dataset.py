@@ -1,31 +1,33 @@
-from typing import (
-    List,
-    Any,
-    Optional,
-    Collection,
-    TypeVar,
-    Sequence,
-    Union,
-    Tuple,
-    Callable,
-    Dict,
-)
-import threading
 import math
+import subprocess
+import threading
+from abc import ABC, abstractmethod
+from operator import methodcaller
 from pathlib import Path
+from typing import (
+    Any,
+    Callable,
+    Collection,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    Union,
+)
+
+import numba
+import numpy as np
 import torch
 import torch.distributed as dist
-import numpy as np
-from operator import methodcaller
-import subprocess
-from tqdm import tqdm
 from Bio import SeqIO
-import numba
-from .tensor import collate_tensors, numpy_seed
-from .typed import PathLike
-from .align import MSA
-from .tokenization import Vocab
 
+from .align import MSA
+from .ffindex import MSAFFindex
+from .tensor import collate_tensors, numpy_seed
+from .tokenization import Vocab
+from .typed import PathLike
 
 T = TypeVar("T")
 
@@ -135,9 +137,9 @@ class SubsetDataset(BaseWrapperDataset):
         percentages[-1] = 1
         with numpy_seed(seed):
             indices = np.random.permutation(np.arange(len(dataset)))  # type: ignore
-            start, end = (
-                percentages[index : index + 2] * len(dataset)  # type: ignore
-            ).astype(np.int64)
+            start, end = (percentages[index : index + 2] * len(dataset)).astype(  # type: ignore
+                np.int64
+            )
             indices = np.sort(indices[start:end])
         self._indices = indices
         self.sizes = dataset.sizes[indices]  # type: ignore
@@ -212,10 +214,11 @@ class NPZDataset(torch.utils.data.Dataset):
         return item
 
 
-class A3MDataset(torch.utils.data.Dataset):
-    """Creates a dataset from a directory of a3m files.
+class MSADataset(torch.utils.data.Dataset, ABC):
+    """Creates a dataset from a directory of a2m/a3m files.
     Args:
-        data_file (Union[str, Path]): Path to directory of a3m files
+        file_ext (str): File ext to use, either 'a2m' or 'a3m'.
+        data_file (Union[str, Path]): Path to directory of a2m/a3m files
         split_files (Optional[Collection[str]]): Subset of files to use,
             can be used to specify training / validation / testing sets.
     """
@@ -223,6 +226,7 @@ class A3MDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         data_file: PathLike,
+        file_ext: str = "a3m",
         split_files: Optional[Collection[str]] = None,
         max_seqs_per_msa: Optional[int] = None,
         sample_method: str = "hhfilter",
@@ -234,7 +238,7 @@ class A3MDataset(torch.utils.data.Dataset):
         if not data_file.is_dir():
             raise NotADirectoryError(data_file)
 
-        file_glob = data_file.glob("*.a3m")
+        file_glob = data_file.glob(f"*.{file_ext}")
         if split_files is None:
             file_list = list(file_glob)
         else:
@@ -250,7 +254,7 @@ class A3MDataset(torch.utils.data.Dataset):
                 )
 
         if len(file_list) == 0:
-            raise FileNotFoundError(f"No .a3m files found in {data_file}")
+            raise FileNotFoundError(f"No .{file_ext} files found in {data_file}")
 
         self._file_list = sorted(file_list)
         self.keys = {f.stem: i for i, f in enumerate(self._file_list)}
@@ -264,6 +268,10 @@ class A3MDataset(torch.utils.data.Dataset):
     def key(self, index: int) -> str:
         return self._file_list[index].stem
 
+    @abstractmethod
+    def read_msa(self, index: int) -> MSA:
+        raise NotImplementedError("Must implement read_msa method")
+
     def __len__(self) -> int:
         return len(self._file_list)
 
@@ -274,30 +282,54 @@ class A3MDataset(torch.utils.data.Dataset):
             seq = str(next(SeqIO.parse(self._file_list[index], "fasta")).seq)
             return seq
         else:
-            msa = MSA.from_fasta(self._file_list[index])
+            # msa = MSA.from_fasta(self._file_list[index])
+            msa = self.read_msa(index)
             if self._max_seqs_per_msa is not None:
-                msa = msa.select_diverse(
-                    self._max_seqs_per_msa, method=self._sample_method
-                )
+                msa = msa.select_diverse(self._max_seqs_per_msa, method=self._sample_method)
             return msa
 
 
-class EncodedA3MDataset(CollatableVocabDataset, A3MDataset):
-    def __init__(
-        self,
-        data_file: PathLike,
-        vocab: Vocab,
-        split_files: Optional[Collection[str]] = None,
-        max_seqs_per_msa: Optional[int] = None,
-        sample_method: str = "hhfilter",
-    ):
-        super().__init__(
-            data_file=data_file,
-            vocab=vocab,
-            split_files=split_files,
-            max_seqs_per_msa=max_seqs_per_msa,
-            sample_method=sample_method,
+class A3MDataset(MSADataset):
+    """Reads A3M files from a directory (removes insertions and gaps)"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(file_ext="a3m", *args, **kwargs)
+
+    def read_msa(self, index):
+        return MSA.from_fasta(
+            self._file_list[index],
+            keep_insertions=False,
+            uppercase=False,
+            remove_lowercase_cols=False,
         )
+
+
+class A2MDataset(MSADataset):
+    """Reads A2M files from a directory (keeps insertions and gaps)"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(file_ext="a2m", *args, **kwargs)
+
+    def read_msa(self, index):
+        return MSA.from_fasta(
+            self._file_list[index],
+            keep_insertions=True,
+            uppercase=True,
+            remove_lowercase_cols=False,
+        )
+
+
+class EncodedA3MDataset(CollatableVocabDataset, A3MDataset):
+    def __init__(self, vocab: Vocab, *args, **kwargs):
+        super().__init__(vocab=vocab, *args, **kwargs)
+
+    def __getitem__(self, idx):
+        return self.vocab.encode(super().__getitem__(idx))
+
+
+class EncodedA2MDataset(CollatableVocabDataset, A2MDataset):
+    def __init__(self, vocab: Vocab, *args, **kwargs):
+        super().__init__(vocab=vocab, *args, **kwargs)
 
     def __getitem__(self, idx):
         return self.vocab.encode(super().__getitem__(idx))
@@ -374,6 +406,26 @@ class EncodedFastaDataset(CollatableVocabDataset, FastaDataset):
         return torch.from_numpy(self.vocab.encode_single_sequence(seq))
 
 
+class EncodedLargeMSADataset(CollatableVocabDataset):
+    def __init__(self, ffindex_path: PathLike, vocab: Vocab):
+        super().__init__(vocab)
+
+        ffindex_path = Path(ffindex_path)
+        index_file = ffindex_path.with_suffix(".ffindex")
+        data_file = ffindex_path.with_suffix(".ffdata")
+        self.ffindex = MSAFFindex(index_file, data_file)
+
+    def __len__(self):
+        return len(self.ffindex)
+
+    def __getitem__(self, idx):
+        msa = self.ffindex[idx]
+        return torch.from_numpy(self.vocab.encode(msa))
+
+    def collater(self, batch: List[Any]) -> Any:
+        return collate_tensors(batch)
+
+
 class TorchDataset(CollatableVocabDataset):
     def __init__(self, data_file: PathLike, vocab: Vocab):
         data_file = Path(data_file)
@@ -431,9 +483,7 @@ BatchOrSequence = TypeVar("BatchOrSequence", MaxTokenBatch, Sequence[MaxTokenBat
 
 
 class AutoBatchingDataset(torch.utils.data.IterableDataset):
-    def __init__(
-        self, dataset: CollatableVocabDataset, max_tokens: int, shuffle: bool = False
-    ):
+    def __init__(self, dataset: CollatableVocabDataset, max_tokens: int, shuffle: bool = False):
         super().__init__()
         self.dataset = dataset
         self.vocab = dataset.vocab
@@ -447,9 +497,7 @@ class AutoBatchingDataset(torch.utils.data.IterableDataset):
     ) -> Tuple[BatchOrSequence, bool]:
         if batch is None:
             if isinstance(item, torch.Tensor):
-                batch = MaxTokenBatch(  # type: ignore
-                    self.max_tokens, self.vocab.pad_idx
-                )
+                batch = MaxTokenBatch(self.max_tokens, self.vocab.pad_idx)  # type: ignore
             else:
                 batch = [  # type: ignore
                     MaxTokenBatch(self.max_tokens, self.vocab.pad_idx) for _ in item
@@ -506,9 +554,7 @@ class AutoBatchingDataset(torch.utils.data.IterableDataset):
 
 
 @numba.njit
-def batch_by_size(
-    indices: np.ndarray, sizes: np.ndarray, max_tokens: int
-) -> List[List[int]]:
+def batch_by_size(indices: np.ndarray, sizes: np.ndarray, max_tokens: int) -> List[List[int]]:
     batches: List[List[int]] = []
     batch: List[int] = [0][:0]
     batch_size = 0
@@ -676,9 +722,7 @@ class MaskedTokenWrapperDataset(BaseWrapperDataset):
         do_mask = random_probs < self.mask_prob
 
         tgt = item.masked_fill(~do_mask, self.vocab.pad_idx)
-        mask_with_token = random_probs < (
-            self.mask_prob * (1 - self.leave_unmasked_prob)
-        )
+        mask_with_token = random_probs < (self.mask_prob * (1 - self.leave_unmasked_prob))
         src = item.masked_fill(mask_with_token, self.vocab.mask_idx)
         mask_with_random = random_probs < (self.mask_prob * self.random_token_prob)
         # TODO - maybe prevent special tokens?

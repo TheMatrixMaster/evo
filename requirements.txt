@@ -1,9 +1,0 @@
-pandas
-numpy
-tqdm
-biopython
-numba
-matplotlib
-transformers
-git+https://github.com/songlab-cal/tape@master#egg=tape-proteins
-git+https://github.com/facebookresearch/esm@master#egg=fair-esm
