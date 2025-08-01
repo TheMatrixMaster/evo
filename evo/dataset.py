@@ -25,7 +25,8 @@ from Bio import SeqIO
 
 from .align import MSA
 from .ffindex import MSAFFindex
-from .tensor import collate_tensors, numpy_seed
+from .phylogeny import get_quantile_idx, get_quantization_points_from_geometric_grid
+from .tensor import collate_list_of_dicts, collate_tensors, mask_tensor, numpy_seed
 from .tokenization import Vocab
 from .typed import PathLike
 
@@ -94,6 +95,29 @@ class CollatableVocabDataset(CollatableDataset):
 
     def collater(self, batch: List[Any]) -> Any:
         return collate_tensors(batch, constant_value=self.vocab.pad_idx)
+
+
+class TorchWrapperDataset(CollatableVocabDataset):
+    """TorchWrapperDataset. Wraps an existing torch dataset.
+
+    Args:
+        dataset (torch.utils.data.dataset): Dataset to wrap.
+    """
+
+    def __init__(self, dataset: torch.utils.data.Dataset, vocab: Vocab):
+        super().__init__(vocab)
+        self.dataset = dataset
+
+    def __getattr__(self, name: str):
+        if "dataset" not in self.__dict__:
+            raise AttributeError("No dataset")
+        return getattr(self.dataset, name)
+
+    def __getitem__(self, index: int):
+        return self.dataset[index]
+
+    def __len__(self):
+        return len(self.dataset)
 
 
 class BaseWrapperDataset(CollatableVocabDataset):
@@ -355,17 +379,134 @@ class EncodedParquetDataset(CollatableVocabDataset, ParquetDataset):
         return [self.sequence_col] + self.prop_cols
 
     def collater(self, batch):
-        col_batch = {}
-        for key in self.batch_keys:
-            if isinstance(batch[0][key], (float, int)):
-                col_batch[key] = torch.tensor([item[key] for item in batch])
-            elif isinstance(batch[0][key], (np.ndarray, torch.Tensor)):
-                col_batch[key] = collate_tensors(
-                    [item[key] for item in batch], constant_value=self.vocab.pad_idx
-                )
+        return collate_list_of_dicts(batch, self.batch_keys, self.vocab.pad_idx)
+
+
+class CherriesDataset(torch.utils.data.Dataset):
+    """Creates a dataset of sequence cherries separated by a distance metric
+
+    Loads pairs of protein sequences + a float from .txt file format:
+        num transitions
+        seq1 seq2 time
+        seq1 seq2 time
+    """
+
+    def __init__(
+        self,
+        data_file: PathLike,
+        cache_indices: bool = False,
+        min_t: float = 5e-3,
+        quantize_t: bool = False,
+    ):
+        self.data_file = Path(data_file)
+        if not self.data_file.exists():
+            raise FileNotFoundError(f"{self.data_file}")
+        self.file = ThreadsafeFile(data_file, open)
+        self.cache = Path(f"{data_file}.idx.npy")
+
+        self.min_t = min_t
+        self.quantize_t = quantize_t
+        self.time_bins = np.array(get_quantization_points_from_geometric_grid(), dtype=np.float32)
+
+        if cache_indices:
+            if self.cache.exists():
+                self.offsets = np.load(self.cache)
             else:
-                col_batch[key] = [item[key] for item in batch]
-        return col_batch
+                self.offsets = self._build_index()
+                np.save(self.cache, self.offsets)
+        else:
+            self.offsets = self._build_index()
+
+    def __getitem__(self, idx):
+        self.file.seek(self.offsets[idx])
+        if idx == len(self) - 1:
+            data = self.file.read()
+        else:
+            data = self.file.read(self.offsets[idx + 1] - self.offsets[idx])
+        line = data.strip()
+        parts = line.split()
+        seq1, seq2, t = parts[0], parts[1], float(parts[2])
+        t = max(t, self.min_t)
+        if self.quantize_t:
+            t = get_quantile_idx(self.time_bins, t)
+        return seq1, seq2, t
+
+    def __len__(self):
+        return self.offsets.size
+
+    def _build_index(self):
+        offsets = []
+        with open(self.data_file, "r") as f:
+            # Skip first line (header)
+            f.readline()
+            while True:
+                offset = f.tell()
+                line = f.readline()
+                if not line:
+                    break
+                offsets.append(offset)
+        return np.array(offsets, dtype=np.int64)
+
+
+class EncodedCherriesDataset(TorchWrapperDataset):
+    def __init__(self, dataset: CherriesDataset, vocab: Vocab, *args, **kwargs):
+        super().__init__(dataset=dataset, vocab=vocab, *args, **kwargs)
+
+    def __getitem__(self, index: int) -> torch.Tensor:
+        x, y, t = super().__getitem__(index)
+        x = torch.from_numpy(self.vocab.encode_single_sequence(x))
+        y = torch.from_numpy(self.vocab.encode_single_sequence(y))
+        return x, y, t
+
+    def collater(self, batch: List[Any]) -> Any:
+        xs, ys, ts = zip(*batch)
+        xs = collate_tensors(xs, constant_value=self.vocab.pad_idx)
+        ys = collate_tensors(ys, constant_value=self.vocab.pad_idx)
+        ts = torch.tensor(ts, dtype=torch.float32).reshape(-1, 1)
+        return xs, ys, ts
+
+
+class EncodedPEINTDataset(EncodedCherriesDataset):
+    def __init__(
+        self,
+        dataset: CherriesDataset,
+        vocab: Vocab,
+        mask_prob: float = 0.15,
+        random_token_prob: float = 0.1,
+        leave_unmasked_prob: float = 0.1,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(dataset, vocab, *args, **kwargs)
+        self._mask_prob = mask_prob
+        self._random_token_prob = random_token_prob
+        self._leave_unmasked_prob = leave_unmasked_prob
+
+    def __getitem__(self, index):
+        x, y, t = super().__getitem__(index)
+        x_src, x_tgt = mask_tensor(
+            x,
+            self.vocab,  # x_tgt gets pad tok at masked pos
+            mask_prob=self._mask_prob,
+            random_token_prob=self._random_token_prob,
+            leave_unmasked_prob=self._leave_unmasked_prob,
+        )
+        y_src, y_tgt = y[:-1], y[1:]  # Shift y for auto-regressive training
+        x_src_pad_mask = x_src == self.vocab.pad_idx
+        y_src_pad_mask = y_src == self.vocab.pad_idx
+        return x_src, x_tgt, y_src, y_tgt, t, x_src_pad_mask, y_src_pad_mask
+
+    def collater(self, batch):
+        x_src, x_tgt, y_src, y_tgt, t, x_src_pad_mask, y_src_pad_mask = zip(*batch)
+        return (
+            collate_tensors(x_src, constant_value=self.vocab.pad_idx),
+            collate_tensors(x_tgt, constant_value=self.vocab.pad_idx),
+            collate_tensors(y_src, constant_value=self.vocab.pad_idx),
+            collate_tensors(y_tgt, constant_value=self.vocab.pad_idx),
+            torch.tensor(t, dtype=torch.float32).reshape(-1, 1),
+            collate_tensors(x_src_pad_mask, constant_value=True, dtype=torch.bool),
+            collate_tensors(y_src_pad_mask, constant_value=True, dtype=torch.bool),
+        )
 
 
 class FastaDataset(SizedDataset):
@@ -718,7 +859,6 @@ class SubsampleMSADataset(BaseWrapperDataset):
 
     def __getitem__(self, idx):
         msa = self.dataset[idx]
-
         num_alignments, seqlen = msa.size()
         max_alignments = self.max_tokens // seqlen
         max_alignments = min(self.max_seqs, max_alignments)
@@ -726,7 +866,6 @@ class SubsampleMSADataset(BaseWrapperDataset):
             indices = np.random.randint(1, num_alignments, size=max_alignments - 1)
             indices = np.append(0, indices)
             msa = msa[indices]
-
         return msa
 
 
@@ -786,3 +925,44 @@ class MaskedTokenWrapperDataset(BaseWrapperDataset):
             constant_value=self.vocab.pad_idx,
         )
         return src, tgt
+
+
+# Example usage
+if __name__ == "__main__":
+    from esm.data import Alphabet
+    from torch.utils.data import ConcatDataset, DataLoader
+
+    vocab = Vocab.from_esm_alphabet(Alphabet.from_architecture("ESM-1b"))
+
+    data_file1 = "/Users/stephenlu/Documents/ml/plmr/data/wyatt/subs/heavy/d1.txt"
+    data_file2 = "/Users/stephenlu/Documents/ml/plmr/data/wyatt/subs/heavy/d2.txt"
+
+    dataset1 = CherriesDataset(
+        data_file=data_file1,
+        cache_indices=False,
+        min_t=5e-3,
+    )
+
+    dataset2 = CherriesDataset(
+        data_file=data_file2,
+        cache_indices=False,
+        min_t=5e-3,
+    )
+
+    _dataset = ConcatDataset([dataset1, dataset2])
+
+    dataset = EncodedPEINTDataset(
+        dataset=_dataset,
+        vocab=vocab,
+        mask_prob=0.15,
+        random_token_prob=0.0,
+        leave_unmasked_prob=0.0,
+    )
+
+    dataloader = DataLoader(dataset=dataset, batch_size=8, collate_fn=dataset.collater)
+
+    item = dataset[0]
+
+    batch = next(iter(dataloader))
+
+    # breakpoint()

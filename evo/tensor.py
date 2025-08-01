@@ -1,10 +1,12 @@
-from typing import Sequence, TypeVar, Callable, Generator, Optional
-import functools
-import torch
-import numpy as np
 import contextlib
+import functools
+from typing import Callable, Generator, Optional, Sequence, Tuple, TypeVar
+
+import numpy as np
+import torch
 from tqdm.auto import trange
 
+from .tokenization import Vocab
 
 TensorLike = TypeVar("TensorLike", np.ndarray, torch.Tensor)
 T = TypeVar("T")
@@ -74,9 +76,7 @@ def recursive_make_numpy(item):
         return item
 
 
-def collate_tensors(
-    sequences: Sequence[TensorLike], constant_value=0, dtype=None
-) -> TensorLike:
+def collate_tensors(sequences: Sequence[TensorLike], constant_value=0, dtype=None) -> TensorLike:
     batch_size = len(sequences)
     shape = [batch_size] + np.max([seq.shape for seq in sequences], 0).tolist()
 
@@ -93,6 +93,46 @@ def collate_tensors(
         arr[arrslice] = seq
 
     return array
+
+
+def collate_list_of_dicts(
+    sequences: Sequence[dict],
+    batch_keys: Sequence[str],
+    constant_value=0,
+) -> dict:
+    col_batch = {}
+    for key in batch_keys:
+        if isinstance(sequences[0][key], (float, int)):
+            col_batch[key] = torch.tensor([item[key] for item in sequences])
+        elif isinstance(sequences[0][key], (np.ndarray, torch.Tensor)):
+            col_batch[key] = collate_tensors(
+                [item[key] for item in sequences], constant_value=constant_value
+            )
+        else:
+            col_batch[key] = [item[key] for item in sequences]
+    return col_batch
+
+
+def mask_tensor(
+    x: torch.Tensor,
+    vocab: Vocab,
+    mask_prob: float = 0.15,
+    random_token_prob: float = 0.1,
+    leave_unmasked_prob: float = 0.1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    special_tokens = [vocab.bos_idx, vocab.eos_idx, vocab.pad_idx, vocab.mask_idx]
+    special_tokens = torch.Tensor(special_tokens).to(x.device).to(x.dtype)
+    keep_mask = torch.isin(x, special_tokens)
+    random_probs = torch.rand_like(x, dtype=torch.float)
+    random_probs[keep_mask] = 1.0  # Ensure special tokens are not masked
+    do_mask = random_probs < mask_prob
+    tgt = x.masked_fill(~do_mask, vocab.pad_idx)
+    mask_with_token = random_probs < (mask_prob * (1 - leave_unmasked_prob))
+    src = x.masked_fill(mask_with_token, vocab.mask_idx)
+    mask_with_random = random_probs < (mask_prob * random_token_prob)
+    rand_tokens = torch.randint_like(src, len(vocab))
+    src[mask_with_random] = rand_tokens[mask_with_random]
+    return src, tgt
 
 
 def symmetrize(x):

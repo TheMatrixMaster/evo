@@ -250,6 +250,35 @@ class Vocab(object):
         a2n = {a: n for n, a in enumerate(alphabet)}
         return cls(a2n, pad_token="-", prepend_bos=False, append_eos=False, unk_token="-")
 
+    @classmethod
+    def from_peint(cls) -> "Vocab":
+        alphabet = "ARNDCQEGHILKMFPSTWYV-"
+        a2n = {a: n for n, a in enumerate(alphabet)}
+        a2n.update(
+            {
+                "<s>": len(a2n),  # bos
+                "<mask>": len(a2n) + 1,  # mask
+                "</s>": len(a2n) + 2,  # eos
+                "<pad>": len(a2n) + 3,  # pad
+                "X": len(a2n) + 4,  # unk
+            }
+        )
+        # a2n.update({
+        #     'J': a2n['I'],  # ambiguously I or L, just map to I
+        #     'B': a2n['D'],  # ambiguously D or N, just map to D
+        #     'Z': a2n['Q'],  # ambiguously Q or E, just map to Q
+        # })
+        return cls(
+            tokens=a2n,
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="X",
+            pad_token="<pad>",
+            mask_token="<mask>",
+            prepend_bos=False,
+            append_eos=False,
+        )
+
 
 def test_encode_sequence():
     sequence = "LFKLGAENIFLGRKAATKEEAIRFAGEQLVKGGYVEPEYVQAMLDREKLTPTYLGESIAVPHGTVEAK"
