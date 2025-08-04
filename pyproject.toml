@@ -1,35 +1,51 @@
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "evo"
+version = "0.0.1"
+description = "A monorepo for protein utilities"
+authors = [
+    {name = "Stephen Z. Lu", email = "stephen.lu@berkeley.edu"}
+]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas",
+    "numpy",
+    "tqdm",
+    "biopython",
+    "numba",
+    "pyarrow",
+    "matplotlib",
+    "transformers",
+    "tape-proteins @ git+https://github.com/songlab-cal/tape@master",
+    "fair-esm @ git+https://github.com/facebookresearch/esm@main",
+    # --------- Development Tools --------- #
+    "rich",
+    "rootutils",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=3.5.0",
+    "pytest>=7.4.2",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pre-commit>=3.5.0",
+    "pytest>=7.4.2",
+]
 
 [tool.black]
 line-length = 100
 include = '\.pyi?$'
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.mypy]
-python_version = 3.10
+python_version = "3.10"
 ignore_missing_imports = true
-
-[tool.poetry]
-name = "evo"
-version = "0.0.1"
-description = "A monorepo for protein utilities"
-authors = ["Stephen Z. Lu <stephen.lu@berkeley.edu>"]
-readme = "README.md"
-
-[tool.poetry.dependencies]
-pandas = "*"
-numpy = "*"
-tqdm = "*"
-biopython = "*"
-numba = "*"
-matplotlib = "*"
-transformers = "*"
-tape-proteins = { git = "https://github.com/songlab-cal/tape", branch = "master" }
-fair-esm = { git = "https://github.com/facebookresearch/esm", branch = "main" }
-
-# --------- Development Tools --------- #
-rich = "*"
-rootutils = "*"
-pre-commit = "^3.5.0"
-pytest = "^7.4.2"
