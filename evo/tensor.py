@@ -77,7 +77,12 @@ def recursive_make_numpy(item):
 
 
 def collate_tensors(sequences: Sequence[TensorLike], constant_value=0, dtype=None) -> TensorLike:
+    sequences = [seq for seq in sequences if seq is not None]
+
     batch_size = len(sequences)
+    if batch_size == 0:
+        return None
+    
     shape = [batch_size] + np.max([seq.shape for seq in sequences], 0).tolist()
 
     if dtype is None:

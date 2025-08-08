@@ -7,7 +7,15 @@ import numpy as np
 _FASTA_VOCAB = "ARNDCQEGHILKMFPSTWYV"
 
 
-def single_mutant_names(sequence: str) -> List[str]:
+def remove_spaces(seqs: List[str]) -> np.ndarray:
+    return np.array([''.join(s.strip().split(' ')) for s in seqs])
+
+
+def add_spaces(seqs: List[str]) -> np.ndarray:
+    return np.array([' '.join(list(s)) for s in seqs])
+
+
+def single_substitution_names(sequence: str) -> List[str]:
     """Returns the names of all single mutants of a sequence."""
     mutants = []
     for (i, wt), mut in product(enumerate(sequence), _FASTA_VOCAB):
@@ -15,6 +23,25 @@ def single_mutant_names(sequence: str) -> List[str]:
             continue
         mutant = f"{wt}{i + 1}{mut}"
         mutants.append(mutant)
+    return mutants
+
+
+def single_deletion_names(sequence: str) -> List[str]:
+    """Returns the names of all single deletions of a sequence."""
+    mutants = []
+    for i in range(len(sequence)):
+        mutant = f"{sequence[i]}{i + 1}-"
+        mutants.append(mutant)
+    return mutants
+
+
+def single_insertion_names(sequence: str) -> List[str]:
+    """Returns the names of all single insertions of a sequence."""
+    mutants = []
+    for i in range(len(sequence) + 1):
+        for mut in _FASTA_VOCAB:
+            mutant = f"-{i + 1}{mut}"
+            mutants.append(mutant)
     return mutants
 
 
@@ -38,15 +65,32 @@ def make_mutation(sequence: str, mutant: str, start_ind: int = 1) -> str:
         return sequence
     else:
         wt, pos, mut = split_mutant_name(mutant)
-        assert sequence[pos - start_ind] == wt
-        return sequence[: pos - start_ind] + mut + sequence[pos - start_ind + 1 :]
+        pos -= start_ind
+        if pos < 0 or pos > len(sequence):
+            raise ValueError(f"Position {pos} out of bounds for sequence of length {len(sequence)}.")
+        if wt == "-":   # insertion
+            return sequence[:pos] + mut + sequence[pos:]
+        if mut == "-":  # deletion
+            assert sequence[pos] == wt
+            return sequence[:pos] + sequence[pos + 1:]
+        else:           # substitution
+            assert sequence[pos] == wt
+            return sequence[:pos] + mut + sequence[pos + 1:]
 
 
-def create_mutant_df(sequence: str) -> pd.DataFrame:
+def create_mutant_df(sequence: str, subs_only=False) -> pd.DataFrame:
     """Create a dataframe with mutant names and sequences"""
-    names = ["WT"] + single_mutant_names(sequence)
+    names, types = ["WT"], [None]
+    subs = single_substitution_names(sequence)
+    names += subs
+    types += ["substitution"] * len(subs)
+    if not subs_only:
+        ins = single_insertion_names(sequence)
+        dels = single_deletion_names(sequence)
+        names += ins + dels
+        types += ["insertion"] * len(ins) + ["deletion"] * len(dels)
     sequences = [sequence] + [make_mutation(sequence, mut) for mut in names[1:]]
-    return pd.DataFrame({"mutant": names, "sequence": sequences})
+    return pd.DataFrame({"mutant": names, "sequence": sequences, "type": types})
 
 
 def seqdiff(seq1: str, seq2: str) -> str:
@@ -82,3 +126,12 @@ def pivoted_mutant_df(sequence: str, scores: np.ndarray) -> pd.DataFrame:
         columns=columns,
     )
     return df
+
+
+# Example usage:
+if __name__ == "__main__":
+    
+    # Write a simple test to make sure that create_mutant_df() works as expected
+    sequence = "ACDEFGHIKLMNPQRSTVWY"
+    df = create_mutant_df(sequence)
+    print(df.head())

@@ -25,6 +25,7 @@ dependencies = [
     # --------- Development Tools --------- #
     "rich",
     "rootutils",
+    "abnumber>=0.4.4",
 ]
 
 [project.optional-dependencies]
