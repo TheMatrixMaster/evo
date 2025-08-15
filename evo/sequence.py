@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 
 _FASTA_VOCAB = "ARNDCQEGHILKMFPSTWYV"
+_DNA_VOCAB = "ACGT"
 
 
 def remove_spaces(seqs: List[str]) -> np.ndarray:
@@ -15,10 +16,10 @@ def add_spaces(seqs: List[str]) -> np.ndarray:
     return np.array([' '.join(list(s)) for s in seqs])
 
 
-def single_substitution_names(sequence: str) -> List[str]:
+def single_substitution_names(sequence: str, vocab=_FASTA_VOCAB) -> List[str]:
     """Returns the names of all single mutants of a sequence."""
     mutants = []
-    for (i, wt), mut in product(enumerate(sequence), _FASTA_VOCAB):
+    for (i, wt), mut in product(enumerate(sequence), vocab):
         if wt == mut:
             continue
         mutant = f"{wt}{i + 1}{mut}"
@@ -35,11 +36,11 @@ def single_deletion_names(sequence: str) -> List[str]:
     return mutants
 
 
-def single_insertion_names(sequence: str) -> List[str]:
+def single_insertion_names(sequence: str, vocab=_FASTA_VOCAB) -> List[str]:
     """Returns the names of all single insertions of a sequence."""
     mutants = []
     for i in range(len(sequence) + 1):
-        for mut in _FASTA_VOCAB:
+        for mut in vocab:
             mutant = f"-{i + 1}{mut}"
             mutants.append(mutant)
     return mutants
@@ -50,10 +51,26 @@ def split_mutant_name(mutant: str) -> Tuple[str, int, str]:
     return mutant[0], int(mutant[1:-1]), mutant[-1]
 
 
+def sort_mutation_names(mutant: str) -> str:
+    """Sorts mutation names in a sequence from greatest to smallest position."""
+    delimiters = [",", r"\+", ":"]
+    expression = re.compile("|".join(delimiters))
+    if mutant.upper() == "WT":
+        return mutant
+    if expression.search(mutant):
+        mutants = expression.split(mutant)
+        mutants = sorted(mutants, key=lambda x: int(x[1:-1]), reverse=True)
+        return ','.join(mutants)
+    return mutant
+
+
 def make_mutation(sequence: str, mutant: str, start_ind: int = 1) -> str:
     """Makes a mutation on a particular sequence. Multiple mutations may be separated
     by ',', ':', or '+', characters.
     """
+    if len(mutant) == 0:
+        return sequence
+    mutant = sort_mutation_names(mutant)
     delimiters = [",", r"\+", ":"]
     expression = re.compile("|".join(delimiters))
     if mutant.upper() == "WT":

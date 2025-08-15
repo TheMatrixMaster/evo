@@ -147,7 +147,7 @@ class BaseWrapperDataset(CollatableVocabDataset):
 
 
 class WeightedConcatDataset(torch.utils.data.ConcatDataset):
-    def __init__(self, datasets, weights = None):
+    def __init__(self, datasets, weights = None, **kwargs):
         super().__init__(datasets)
         if weights is None:
             weights = [1.0 / len(dataset) for dataset in datasets]
@@ -597,7 +597,7 @@ class EncodedFastaDataset(CollatableVocabDataset, FastaDataset):
         return torch.from_numpy(self.vocab.encode_single_sequence(seq))
 
 
-class EncodedPeintDiffDataset(BaseWrapperDataset):
+class EncodedPEINTDiffDataset(TorchWrapperDataset):
     def __init__(
         self,
         dataset: CherriesDataset | FastaDataset,
@@ -609,8 +609,9 @@ class EncodedPeintDiffDataset(BaseWrapperDataset):
 
     @property
     def weights(self):
-        assert isinstance(self.dataset, WeightedConcatDataset)
-        return self.dataset.weights
+        if isinstance(self.dataset, WeightedConcatDataset):
+            return self.dataset.weights
+        return np.ones(len(self.dataset), dtype=np.float32)
 
     def __getitem__(self, index):
         item = super().__getitem__(index)
