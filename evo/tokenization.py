@@ -109,11 +109,13 @@ class Vocab(object):
         assert array.dtype in (np.dtype("S1"), np.uint8)
         array = array.view(np.uint8)
         mask = ~np.isin(array, self.uint8_symbols)
-        if mask.any():
-            array = array.copy()
-            array[mask] = ord(self.unk_token)  # type: ignore
         locs = np.digitize(array, self.uint8_symbols, right=True)
+        locs = np.clip(locs, 0, len(self.numpy_indices) - 1)    # ensure in bounds
         indices = self.numpy_indices[locs.reshape(-1)].reshape(locs.shape)
+        if mask.any():
+            if not self.allow_unknown:
+                raise ValueError("Unknown tokens found but unk_token not set")
+            indices[mask] = self.unk_idx
         return indices
 
     def add_special_tokens(self, array: np.ndarray) -> np.ndarray:
@@ -277,6 +279,53 @@ class Vocab(object):
             mask_token="<mask>",
             prepend_bos=False,
             append_eos=False,
+        )
+
+    @classmethod
+    def from_msa_editflows(cls) -> "Vocab":
+        a2n = {
+            "<cls>": 0,
+            "<pad>": 1,
+            "<eos>": 2,
+            "<unk>": 3,
+            "L": 4,
+            "A": 5,
+            "G": 6,
+            "V": 7,
+            "S": 8,
+            "E": 9,
+            "R": 10,
+            "T": 11,
+            "I": 12,
+            "D": 13,
+            "P": 14,
+            "K": 15,
+            "Q": 16,
+            "N": 17,
+            "F": 18,
+            "Y": 19,
+            "M": 20,
+            "H": 21,
+            "W": 22,
+            "C": 23,
+            "X": 24,
+            "B": 25,
+            "U": 26,
+            "Z": 27,
+            "O": 28,
+            ".": 29,
+            "-": 29,
+            # "<mask>": 30,
+        }
+        return cls(
+            tokens=a2n,
+            bos_token="<cls>",
+            eos_token="<eos>",
+            unk_token="<unk>",
+            pad_token="<pad>",
+            mask_token=None,
+            prepend_bos=True,
+            append_eos=True,
         )
 
 

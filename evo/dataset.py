@@ -588,8 +588,8 @@ class FastaDataset(SizedDataset):
 
 
 class EncodedFastaDataset(CollatableVocabDataset, FastaDataset):
-    def __init__(self, data_file: PathLike, vocab: Vocab):
-        super().__init__(data_file=data_file, vocab=vocab, cache_indices=True)
+    def __init__(self, data_file: PathLike, vocab: Vocab, cache_indices: bool = False):
+        super().__init__(data_file=data_file, vocab=vocab, cache_indices=cache_indices)
         self._sizes += int(self.vocab.prepend_bos) + int(self.vocab.append_eos)
 
     def __getitem__(self, index: int) -> torch.Tensor:
@@ -917,6 +917,20 @@ class RandomCropDataset(BaseWrapperDataset):
                 -1,
             )
         return item
+
+
+class EncodedSubsampleMSADataset(TorchWrapperDataset):
+    def __init__(self, dataset: torch.utils.data.Dataset, vocab: Vocab, max_seqs: int, *args, **kwargs):
+        super().__init__(dataset=dataset, vocab=vocab, *args, **kwargs)
+        self.max_seqs = max_seqs
+
+    def __getitem__(self, idx):
+        msa = super().__getitem__(idx)
+        num_alignments = msa.depth
+        if self.max_seqs < num_alignments:
+            indices = np.random.randint(0, num_alignments, size=self.max_seqs)
+            msa = msa[indices]
+        return torch.from_numpy(self.vocab.encode(msa))
 
 
 class SubsampleMSADataset(BaseWrapperDataset):
