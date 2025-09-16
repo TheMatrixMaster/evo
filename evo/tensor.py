@@ -1,6 +1,6 @@
 import contextlib
 import functools
-from typing import Callable, Generator, Optional, Sequence, Tuple, TypeVar
+from typing import Callable, Generator, Optional, Sequence, Tuple, TypeVar, List
 
 import numpy as np
 import torch
@@ -124,8 +124,9 @@ def mask_tensor(
     mask_prob: float = 0.15,
     random_token_prob: float = 0.1,
     leave_unmasked_prob: float = 0.1,
+    extra_special_tok_idx: List[int] = [],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    special_tokens = [vocab.bos_idx, vocab.eos_idx, vocab.pad_idx, vocab.mask_idx]
+    special_tokens = [vocab.bos_idx, vocab.eos_idx, vocab.pad_idx, vocab.mask_idx] + extra_special_tok_idx
     special_tokens = torch.Tensor(special_tokens).to(x.device).to(x.dtype)
     keep_mask = torch.isin(x, special_tokens)
     random_probs = torch.rand_like(x, dtype=torch.float)
