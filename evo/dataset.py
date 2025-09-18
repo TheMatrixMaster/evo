@@ -32,6 +32,13 @@ from .typed import PathLike
 
 T = TypeVar("T")
 
+def is_number(s):
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
 
 class ThreadsafeFile:
     def __init__(
@@ -442,8 +449,10 @@ class CherriesDataset(torch.utils.data.Dataset):
             data = self.file.read(self.offsets[idx + 1] - self.offsets[idx])
         line = data.strip()
         parts = line.split()
-        seq1, seq2, t = parts[0], parts[1], float(parts[2])
-        t = max(t, self.min_t)
+        seq1, seq2, t = parts[0], parts[1], str(parts[2])
+        if is_number(t):
+            t = float(t)
+            t = max(t, self.min_t)
         if self.quantize_t:
             t = get_quantile_idx(self.time_bins, t)
         return seq1, seq2, t

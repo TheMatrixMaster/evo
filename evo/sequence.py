@@ -1,11 +1,101 @@
-from typing import List, Tuple
 import re
+from typing import List, Tuple
 from itertools import product, zip_longest
-import pandas as pd
+
 import numpy as np
+import pandas as pd
+from Bio.Seq import Seq
+from Bio.Data import CodonTable
+
 
 _FASTA_VOCAB = "ARNDCQEGHILKMFPSTWYV"
+_AA_STR_SORTED = "ACDEFGHIKLMNPQRSTVWY"
 _DNA_VOCAB = "ACGT"
+
+# Add additional tokens to this string:
+RESERVED_TOKENS = "^"
+# Each token in RESERVED_TOKENS will appear once in aa strings, and three times in nt strings.
+RESERVED_TOKEN_TRANSLATIONS = {token * 3: token for token in RESERVED_TOKENS}
+
+# Human codon usage frequencies from:
+# https://www.kazusa.or.jp/codon/cgi-bin/showcodon.cgi?species=9606&aa=1
+# Values are per thousand
+HUMAN_CODON_USAGE = {
+    "TTT": 17.6,
+    "TTC": 20.3,  # Phe
+    "TTA": 7.7,
+    "TTG": 12.9,  # Leu
+    "CTT": 13.2,
+    "CTC": 19.6,  # Leu
+    "CTA": 7.2,
+    "CTG": 39.6,  # Leu
+    "ATT": 16.0,
+    "ATC": 20.8,  # Ile
+    "ATA": 7.5,  # Ile
+    "ATG": 22.0,  # Met
+    "GTT": 11.0,
+    "GTC": 14.5,  # Val
+    "GTA": 7.1,
+    "GTG": 28.1,  # Val
+    "TCT": 15.2,
+    "TCC": 17.7,  # Ser
+    "TCA": 12.2,
+    "TCG": 4.4,  # Ser
+    "CCT": 17.5,
+    "CCC": 19.8,  # Pro
+    "CCA": 16.9,
+    "CCG": 6.9,  # Pro
+    "ACT": 13.1,
+    "ACC": 18.9,  # Thr
+    "ACA": 15.1,
+    "ACG": 6.1,  # Thr
+    "GCT": 18.4,
+    "GCC": 27.7,  # Ala
+    "GCA": 15.8,
+    "GCG": 7.4,  # Ala
+    "TAT": 12.2,
+    "TAC": 15.3,  # Tyr
+    "TAA": 1.0,
+    "TAG": 0.8,  # Stop
+    "CAT": 10.9,
+    "CAC": 15.1,  # His
+    "CAA": 12.3,
+    "CAG": 34.2,  # Gln
+    "AAT": 17.0,
+    "AAC": 19.1,  # Asn
+    "AAA": 24.4,
+    "AAG": 31.9,  # Lys
+    "GAT": 21.8,
+    "GAC": 25.1,  # Asp
+    "GAA": 29.0,
+    "GAG": 39.6,  # Glu
+    "TGT": 10.6,
+    "TGC": 12.6,  # Cys
+    "TGA": 1.6,  # Stop
+    "TGG": 13.2,  # Trp
+    "CGT": 4.5,
+    "CGC": 10.4,  # Arg
+    "CGA": 6.2,
+    "CGG": 11.4,  # Arg
+    "AGT": 12.1,
+    "AGC": 19.5,  # Ser
+    "AGA": 12.2,
+    "AGG": 12.0,  # Arg
+    "GGT": 10.8,
+    "GGC": 22.2,  # Gly
+    "GGA": 16.5,
+    "GGG": 16.5,  # Gly
+}
+
+# Get standard genetic code from Biopython
+standard_table = CodonTable.standard_dna_table
+forward_table = standard_table.forward_table
+
+# Create a mapping of amino acids to their most common codon in humans
+PREFERRED_CODONS = {}
+for aa in set(forward_table.values()):
+    possible_codons = [codon for codon, amino in forward_table.items() if amino == aa]
+    PREFERRED_CODONS[aa] = max(possible_codons, key=lambda c: HUMAN_CODON_USAGE[c])
 
 
 def remove_spaces(seqs: List[str]) -> np.ndarray:
@@ -44,6 +134,18 @@ def single_insertion_names(sequence: str, vocab=_FASTA_VOCAB) -> List[str]:
             mutant = f"-{i + 1}{mut}"
             mutants.append(mutant)
     return mutants
+
+
+def get_mutant(mutant: str, wildtype: str) -> str:
+    assert len(mutant) == len(wildtype), "Mutant and wildtype sequences must be of the same length"
+    different_indices = [i for i, (m, w) in enumerate(zip(mutant, wildtype)) if m != w]
+    assert len(different_indices) <= 1, "There should be exactly one mutation"
+    if len(different_indices) == 0:
+        return ""
+    idx = different_indices[0]
+    wt = wildtype[idx]
+    mt = mutant[idx]
+    return f"{wt}{idx}{mt}"
 
 
 def split_mutant_name(mutant: str) -> Tuple[str, int, str]:
@@ -143,6 +245,59 @@ def pivoted_mutant_df(sequence: str, scores: np.ndarray) -> pd.DataFrame:
         columns=columns,
     )
     return df
+
+
+def translate_codon(codon):
+    """Translate a codon to an amino acid."""
+    if codon in RESERVED_TOKEN_TRANSLATIONS:
+        return RESERVED_TOKEN_TRANSLATIONS[codon]
+    else:
+        return str(Seq(codon).translate())
+
+
+def translate_sequence(nt_sequence):
+    if len(nt_sequence) % 3 != 0:
+        raise ValueError(f"The sequence '{nt_sequence}' is not a multiple of 3.")
+    aa_seq = "".join(
+        translate_codon(nt_sequence[i : i + 3]) for i in range(0, len(nt_sequence), 3)
+    )
+    if "*" in aa_seq:
+        raise ValueError(f"The sequence '{nt_sequence}' contains a stop codon.")
+    return aa_seq
+
+
+def backtranslate(aa_sequence: str) -> str:
+    """Backtranslate an amino acid sequence to nucleotides using human codon
+    preferences.
+
+    Args:
+        aa_sequence: String of amino acid single letter codes (upper case)
+
+    Returns:
+        String of nucleotides representing the backtranslated sequence
+
+    Raises:
+        KeyError: If an invalid amino acid code is encountered
+    """
+    return "".join(PREFERRED_CODONS[aa] for aa in aa_sequence.upper())
+
+
+def backtranslate_with_v_gene(aa_sequence: str, v_gene_seq: str) -> str:
+    """Backtranslate protein sequence using V gene sequence where possible."""
+    # Truncate v_gene_seq to codon boundary and translate
+    v_gene_seq = v_gene_seq[: len(v_gene_seq) - len(v_gene_seq) % 3]
+    v_gene_aa = translate_sequence(v_gene_seq)
+    consensus_popular_nt = backtranslate(aa_sequence)
+
+    result = ""
+    for i, aa in enumerate(aa_sequence):
+        if i < len(v_gene_aa) and aa == v_gene_aa[i]:
+            result += v_gene_seq[i * 3 : i * 3 + 3]
+        else:
+            result += consensus_popular_nt[i * 3 : i * 3 + 3]
+
+    assert translate_sequence(result) == aa_sequence
+    return result
 
 
 # Example usage:
