@@ -26,11 +26,12 @@ from Bio import SeqIO
 from .align import MSA
 from .ffindex import MSAFFindex
 from .phylogeny import get_quantile_idx, get_quantization_points_from_geometric_grid
-from .tensor import collate_list_of_dicts, collate_tensors, mask_tensor, numpy_seed
+from .tensor import collate_list_of_dicts, collate_tensors, numpy_seed
 from .tokenization import Vocab
 from .typed import PathLike
 
 T = TypeVar("T")
+
 
 def is_number(s):
     try:
@@ -154,15 +155,14 @@ class BaseWrapperDataset(CollatableVocabDataset):
 
 
 class WeightedConcatDataset(torch.utils.data.ConcatDataset):
-    def __init__(self, datasets, weights = None, **kwargs):
+    def __init__(self, datasets, weights=None, **kwargs):
         super().__init__(datasets)
         if weights is None:
             weights = [1.0 / len(dataset) for dataset in datasets]
         assert len(datasets) == len(weights)
         # repeat weight len(dataset) times for each dataset
         self._weights = [
-            weight for dataset, weight in zip(datasets, weights)
-            for _ in range(len(dataset))
+            weight for dataset, weight in zip(datasets, weights) for _ in range(len(dataset))
         ]
 
     @property
@@ -474,65 +474,41 @@ class CherriesDataset(torch.utils.data.Dataset):
         return np.array(offsets, dtype=np.int64)
 
 
-class EncodedCherriesDataset(TorchWrapperDataset):
-    def __init__(self, dataset: CherriesDataset, vocab: Vocab, *args, **kwargs):
-        super().__init__(dataset=dataset, vocab=vocab, *args, **kwargs)
+class ComplexCherriesDataset(CherriesDataset):
+    """Extension of cherries dataset that handles complex sequences with a chain break separator character."""
 
-    def __getitem__(self, index: int) -> torch.Tensor:
-        x, y, t = super().__getitem__(index)
-        x = torch.from_numpy(self.vocab.encode_single_sequence(x))
-        y = torch.from_numpy(self.vocab.encode_single_sequence(y))
-        return x, y, t
+    def __init__(self, sep_token: str = ".", *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sep_token = sep_token
 
-    def collater(self, batch: List[Any]) -> Any:
-        xs, ys, ts = zip(*batch)
-        xs = collate_tensors(xs, constant_value=self.vocab.pad_idx)
-        ys = collate_tensors(ys, constant_value=self.vocab.pad_idx)
-        ts = torch.tensor(ts, dtype=torch.float32).reshape(-1, 1)
+    def __getitem__(self, idx):
+        self.file.seek(self.offsets[idx])
+        if idx == len(self) - 1:
+            data = self.file.read()
+        else:
+            data = self.file.read(self.offsets[idx + 1] - self.offsets[idx])
+        line = data.strip()
+        parts = line.split()
+        seq1, seq2, ts = str(parts[0]), str(parts[1]), parts[2:]
+
+        xs = seq1.split(self.sep_token)
+        ys = seq2.split(self.sep_token)
+        assert len(xs) == len(
+            ys
+        ), f"Different number of chains in {seq1} and {seq2} is not allowed."
+
+        if len(ts) > len(xs):
+            ts = ts[: len(xs)]
+        elif len(ts) < len(xs):
+            ts = ts + [ts[-1]] * (len(xs) - len(ts))
+
+        for i in range(len(ts)):
+            if is_number(ts[i]):
+                ts[i] = float(ts[i])
+                ts[i] = max(ts[i], self.min_t)
+                ts[i] = get_quantile_idx(self.time_bins, ts[i]) if self.quantize_t else ts[i]
+
         return xs, ys, ts
-
-
-class EncodedPEINTDataset(EncodedCherriesDataset):
-    def __init__(
-        self,
-        dataset: CherriesDataset,
-        vocab: Vocab,
-        mask_prob: float = 0.15,
-        random_token_prob: float = 0.1,
-        leave_unmasked_prob: float = 0.1,
-        *args,
-        **kwargs,
-    ):
-        super().__init__(dataset, vocab, *args, **kwargs)
-        self._mask_prob = mask_prob
-        self._random_token_prob = random_token_prob
-        self._leave_unmasked_prob = leave_unmasked_prob
-
-    def __getitem__(self, index):
-        x, y, t = super().__getitem__(index)
-        x_src, x_tgt = mask_tensor(
-            x,
-            self.vocab,  # x_tgt gets pad tok at masked pos
-            mask_prob=self._mask_prob,
-            random_token_prob=self._random_token_prob,
-            leave_unmasked_prob=self._leave_unmasked_prob,
-        )
-        y_src, y_tgt = y[:-1], y[1:]  # Shift y for auto-regressive training
-        x_src_pad_mask = x_src == self.vocab.pad_idx
-        y_src_pad_mask = y_src == self.vocab.pad_idx
-        return x_src, x_tgt, y_src, y_tgt, t, x_src_pad_mask, y_src_pad_mask
-
-    def collater(self, batch):
-        x_src, x_tgt, y_src, y_tgt, t, x_src_pad_mask, y_src_pad_mask = zip(*batch)
-        return (
-            collate_tensors(x_src, constant_value=self.vocab.pad_idx),
-            collate_tensors(x_tgt, constant_value=self.vocab.pad_idx),
-            collate_tensors(y_src, constant_value=self.vocab.pad_idx),
-            collate_tensors(y_tgt, constant_value=self.vocab.pad_idx),
-            torch.tensor(t, dtype=torch.float32).reshape(-1, 1),
-            collate_tensors(x_src_pad_mask, constant_value=True, dtype=torch.bool),
-            collate_tensors(y_src_pad_mask, constant_value=True, dtype=torch.bool),
-        )
 
 
 class FastaDataset(SizedDataset):
@@ -604,62 +580,6 @@ class EncodedFastaDataset(CollatableVocabDataset, FastaDataset):
     def __getitem__(self, index: int) -> torch.Tensor:
         desc, seq = super().__getitem__(index)
         return torch.from_numpy(self.vocab.encode_single_sequence(seq))
-
-
-class EncodedPEINTDiffDataset(TorchWrapperDataset):
-    def __init__(
-        self,
-        dataset: CherriesDataset | FastaDataset,
-        vocab: Vocab,
-        *args,
-        **kwargs,
-    ):
-        super().__init__(dataset=dataset, vocab=vocab, *args, **kwargs)
-
-    @property
-    def weights(self):
-        if isinstance(self.dataset, WeightedConcatDataset):
-            return self.dataset.weights
-        return np.ones(len(self.dataset), dtype=np.float32)
-
-    def __getitem__(self, index):
-        item = super().__getitem__(index)
-        if isinstance(item, tuple):
-            x, y, t = item
-            x = torch.from_numpy(self.vocab.encode_single_sequence(x))
-            y = torch.from_numpy(self.vocab.encode_single_sequence(y))
-            labeled = True
-            y_src, y_tgt = y[:-1], y[1:]
-            y_src_pad_mask = y_src == self.vocab.pad_idx
-        else:
-            x = item
-            x = torch.from_numpy(self.vocab.encode_single_sequence(x))
-            labeled = False
-            y_src, y_tgt, t = None, None, None
-            y_src_pad_mask = None
-        x_pad_mask = x == self.vocab.pad_idx
-        return x, x_pad_mask, labeled, y_src, y_tgt, t, y_src_pad_mask
-
-    def collater(self, batch):
-        x, x_pad_mask, labeled, y_src, y_tgt, t, y_src_pad_mask = zip(*batch)
-        t = [t for t in t if t is not None]
-        return (
-            # Encoder input
-            collate_tensors(x, constant_value=self.vocab.pad_idx),
-            collate_tensors(x_pad_mask, constant_value=True, dtype=torch.bool),
-            # Decoder input
-            torch.tensor(labeled, dtype=torch.bool),
-            collate_tensors(y_src, constant_value=self.vocab.pad_idx),
-            collate_tensors(y_tgt, constant_value=self.vocab.pad_idx),
-            torch.tensor(t, dtype=torch.float32).reshape(-1, 1),
-            collate_tensors(y_src_pad_mask, constant_value=True, dtype=torch.bool),
-        )
-
-    def sampler(self):
-        return torch.utils.data.WeightedRandomSampler(
-            weights=self.weights,
-            num_samples=len(self.dataset),
-        )
 
 
 class EncodedIndexedMSADataset(CollatableVocabDataset):
@@ -929,7 +849,9 @@ class RandomCropDataset(BaseWrapperDataset):
 
 
 class EncodedSubsampleMSADataset(TorchWrapperDataset):
-    def __init__(self, dataset: torch.utils.data.Dataset, vocab: Vocab, max_seqs: int, *args, **kwargs):
+    def __init__(
+        self, dataset: torch.utils.data.Dataset, vocab: Vocab, max_seqs: int, *args, **kwargs
+    ):
         super().__init__(dataset=dataset, vocab=vocab, *args, **kwargs)
         self.max_seqs = max_seqs
 
@@ -1021,44 +943,3 @@ class MaskedTokenWrapperDataset(BaseWrapperDataset):
             constant_value=self.vocab.pad_idx,
         )
         return src, tgt
-
-
-# Example usage
-if __name__ == "__main__":
-    from esm.data import Alphabet
-    from torch.utils.data import ConcatDataset, DataLoader
-
-    vocab = Vocab.from_esm_alphabet(Alphabet.from_architecture("ESM-1b"))
-
-    data_file1 = "/Users/stephenlu/Documents/ml/plmr/data/wyatt/subs/heavy/d1.txt"
-    data_file2 = "/Users/stephenlu/Documents/ml/plmr/data/wyatt/subs/heavy/d2.txt"
-
-    dataset1 = CherriesDataset(
-        data_file=data_file1,
-        cache_indices=False,
-        min_t=5e-3,
-    )
-
-    dataset2 = CherriesDataset(
-        data_file=data_file2,
-        cache_indices=False,
-        min_t=5e-3,
-    )
-
-    _dataset = ConcatDataset([dataset1, dataset2])
-
-    dataset = EncodedPEINTDataset(
-        dataset=_dataset,
-        vocab=vocab,
-        mask_prob=0.15,
-        random_token_prob=0.0,
-        leave_unmasked_prob=0.0,
-    )
-
-    dataloader = DataLoader(dataset=dataset, batch_size=8, collate_fn=dataset.collater)
-
-    item = dataset[0]
-
-    batch = next(iter(dataloader))
-
-    # breakpoint()
