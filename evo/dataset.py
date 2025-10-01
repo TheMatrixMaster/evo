@@ -425,7 +425,7 @@ class CherriesDataset(torch.utils.data.Dataset):
         self.data_file = Path(data_file)
         if not self.data_file.exists():
             raise FileNotFoundError(f"{self.data_file}")
-        self.file = ThreadsafeFile(data_file, open)
+        self.file = None
         self.cache = Path(f"{data_file}.idx.npy")
 
         self.min_t = min_t
@@ -442,6 +442,9 @@ class CherriesDataset(torch.utils.data.Dataset):
             self.offsets = self._build_index()
 
     def __getitem__(self, idx):
+        if self.file is None:
+            self.file = ThreadsafeFile(self.data_file, open)
+
         self.file.seek(self.offsets[idx])
         if idx == len(self) - 1:
             data = self.file.read()
@@ -477,11 +480,15 @@ class CherriesDataset(torch.utils.data.Dataset):
 class ComplexCherriesDataset(CherriesDataset):
     """Extension of cherries dataset that handles complex sequences with a chain break separator character."""
 
-    def __init__(self, sep_token: str = ".", *args, **kwargs):
+    def __init__(self, sep_token: str = ".", chain_id_offset: int = 1, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.sep_token = sep_token
+        self.chain_id_offset = chain_id_offset
 
     def __getitem__(self, idx):
+        if self.file is None:
+            self.file = ThreadsafeFile(self.data_file, open)
+
         self.file.seek(self.offsets[idx])
         if idx == len(self) - 1:
             data = self.file.read()
@@ -493,6 +500,8 @@ class ComplexCherriesDataset(CherriesDataset):
 
         xs = seq1.split(self.sep_token)
         ys = seq2.split(self.sep_token)
+        chain_ids = list(range(self.chain_id_offset, self.chain_id_offset + len(xs)))
+
         assert len(xs) == len(
             ys
         ), f"Different number of chains in {seq1} and {seq2} is not allowed."
@@ -508,7 +517,7 @@ class ComplexCherriesDataset(CherriesDataset):
                 ts[i] = max(ts[i], self.min_t)
                 ts[i] = get_quantile_idx(self.time_bins, ts[i]) if self.quantize_t else ts[i]
 
-        return xs, ys, ts
+        return xs, ys, ts, chain_ids
 
 
 class FastaDataset(SizedDataset):
