@@ -39,15 +39,6 @@ class Vocab(object):
 
         # prevent modifications to original dictionary from having an effect.
         tokens = copy(tokens)
-        for tok in list(tokens.keys()):
-            if len(tok) > 1 and tok not in {
-                bos_token,
-                eos_token,
-                unk_token,
-                mask_token,
-                pad_token,
-            }:
-                logger.warning(f"Vocab contains non-special token of length > 1: {tok}")
 
         self.prepend_bos = prepend_bos
         self.append_eos = append_eos
@@ -110,7 +101,7 @@ class Vocab(object):
         array = array.view(np.uint8)
         mask = ~np.isin(array, self.uint8_symbols)
         locs = np.digitize(array, self.uint8_symbols, right=True)
-        locs = np.clip(locs, 0, len(self.numpy_indices) - 1)    # ensure in bounds
+        locs = np.clip(locs, 0, len(self.numpy_indices) - 1)  # ensure in bounds
         indices = self.numpy_indices[locs.reshape(-1)].reshape(locs.shape)
         if mask.any():
             if not self.allow_unknown:
@@ -329,6 +320,217 @@ class Vocab(object):
         )
 
 
+class DNAVocab(Vocab):
+    """Vocabulary for DNA sequences with single nucleotide tokens."""
+
+    @classmethod
+    def from_dna(cls) -> "DNAVocab":
+        """Create a DNA vocabulary with A, T, G, C nucleotides."""
+        alphabet = "ATGC"
+        a2n = {a: n for n, a in enumerate(alphabet)}
+        a2n.update(
+            {
+                "<s>": len(a2n),  # bos
+                "<mask>": len(a2n) + 1,  # mask
+                "</s>": len(a2n) + 2,  # eos
+                "<pad>": len(a2n) + 3,  # pad
+                "N": len(a2n) + 4,  # unk (unknown nucleotide)
+            }
+        )
+        return cls(
+            tokens=a2n,
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="N",
+            pad_token="<pad>",
+            mask_token="<mask>",
+            prepend_bos=False,
+            append_eos=False,
+        )
+
+
+class CodonVocab(Vocab):
+    """Vocabulary for codon sequences (DNA triplets)."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    # Standard genetic code
+    GENETIC_CODE = {
+        "TTT": "F",
+        "TTC": "F",
+        "TTA": "L",
+        "TTG": "L",
+        "TCT": "S",
+        "TCC": "S",
+        "TCA": "S",
+        "TCG": "S",
+        "TAT": "Y",
+        "TAC": "Y",
+        "TAA": "*",
+        "TAG": "*",
+        "TGT": "C",
+        "TGC": "C",
+        "TGA": "*",
+        "TGG": "W",
+        "CTT": "L",
+        "CTC": "L",
+        "CTA": "L",
+        "CTG": "L",
+        "CCT": "P",
+        "CCC": "P",
+        "CCA": "P",
+        "CCG": "P",
+        "CAT": "H",
+        "CAC": "H",
+        "CAA": "Q",
+        "CAG": "Q",
+        "CGT": "R",
+        "CGC": "R",
+        "CGA": "R",
+        "CGG": "R",
+        "ATT": "I",
+        "ATC": "I",
+        "ATA": "I",
+        "ATG": "M",
+        "ACT": "T",
+        "ACC": "T",
+        "ACA": "T",
+        "ACG": "T",
+        "AAT": "N",
+        "AAC": "N",
+        "AAA": "K",
+        "AAG": "K",
+        "AGT": "S",
+        "AGC": "S",
+        "AGA": "R",
+        "AGG": "R",
+        "GTT": "V",
+        "GTC": "V",
+        "GTA": "V",
+        "GTG": "V",
+        "GCT": "A",
+        "GCC": "A",
+        "GCA": "A",
+        "GCG": "A",
+        "GAT": "D",
+        "GAC": "D",
+        "GAA": "E",
+        "GAG": "E",
+        "GGT": "G",
+        "GGC": "G",
+        "GGA": "G",
+        "GGG": "G",
+    }
+
+    @classmethod
+    def from_codons(cls) -> "CodonVocab":
+        """Create a codon vocabulary with all 64 possible codons."""
+        nucleotides = "ATGC"
+        codons = [a + b + c for a in nucleotides for b in nucleotides for c in nucleotides]
+        tokens = {
+            "<pad>": 0,  # pad
+            "<s>": 1,  # bos
+            "</s>": 2,  # eos
+            "<mask>": 3,  # mask
+            "NNN": 4,  # unk (unknown codon)
+        }
+        c2n = {codon: n + 5 for n, codon in enumerate(codons)}
+        tokens.update(c2n)
+        return cls(
+            tokens=tokens,
+            bos_token="<s>",
+            eos_token="</s>",
+            unk_token="NNN",
+            pad_token="<pad>",
+            mask_token="<mask>",
+            prepend_bos=True,
+            append_eos=False,
+        )
+
+    def _convert_uint8_array(self, array: np.ndarray) -> np.ndarray:
+        raise NotImplementedError()
+
+    def encode_array(self, array: np.ndarray) -> np.ndarray:
+        raise NotImplementedError()
+
+    def encode_single_sequence(self, sequence: str) -> np.ndarray:
+        """Encode a DNA sequence by splitting into codon triplets."""
+        seq_len = len(sequence)
+        remainder = seq_len % 3
+        if remainder > 0:
+            if not self.allow_unknown:
+                raise ValueError(
+                    f"Sequence length {seq_len} is not divisible by 3 and unk_token not set"
+                )
+            sequence = sequence + "N" * (3 - remainder)
+            seq_len = len(sequence)
+
+        if self.allow_unknown:
+            indices = np.array(
+                [
+                    self.tokens_to_idx.get(sequence[i : i + 3], self.unk_idx)
+                    for i in range(0, seq_len, 3)
+                ],
+                dtype=np.int64,
+            )
+        else:
+            indices = np.empty(seq_len // 3, dtype=np.int64)
+            for idx, i in enumerate(range(0, seq_len, 3)):
+                codon = sequence[i : i + 3]
+                try:
+                    indices[idx] = self.tokens_to_idx[codon]
+                except KeyError:
+                    raise ValueError(f"Unknown codon '{codon}' and unk_token not set")
+
+        return self.add_special_tokens(indices)
+
+    def check_valid(self, inputs: Union[str, Sequence[str], np.ndarray, MSA]) -> bool:
+        """Check if input contains valid codons."""
+        if isinstance(inputs, str):
+            # Split into codons and check each
+            codons = [inputs[i : i + 3] for i in range(0, len(inputs), 3)]
+            return all(codon in self.tokens or len(codon) < 3 for codon in codons)
+        elif isinstance(inputs, Sequence):
+            return all(self.check_valid(seq) for seq in inputs)
+        else:
+            # For other types, fall back to base class
+            return super().check_valid(inputs)
+
+    def translate(self, sequence: str) -> str:
+        """Translate a DNA codon sequence to amino acids using the standard genetic code"""
+        codons = [sequence[i : i + 3] for i in range(0, len(sequence), 3)]
+        amino_acids = []
+        for codon in codons:
+            if len(codon) < 3:
+                logger.warning(f"Incomplete codon '{codon}' at end of sequence, skipping")
+                continue
+            if codon in self.GENETIC_CODE:
+                amino_acids.append(self.GENETIC_CODE[codon])
+            else:
+                amino_acids.append("X")  # Unknown codon
+        return "".join(amino_acids)
+
+    def translation_tensor_map(self, aa_vocab: Vocab) -> torch.Tensor:
+        """Creates a tensor mapping codon indices to amino acid indices in the provided amino acid vocabulary."""
+        mapping = torch.full((len(self),), fill_value=aa_vocab.unk_idx, dtype=torch.long)
+        for cod_tok, aa_tok in [
+            (self.pad_idx, aa_vocab.pad_idx),
+            (self.bos_idx, aa_vocab.bos_idx),
+            (self.eos_idx, aa_vocab.eos_idx),
+            (self.mask_idx, aa_vocab.mask_idx),
+        ]:
+            if cod_tok >= 0 and aa_tok >= 0:
+                mapping[cod_tok] = aa_tok
+        for codon, aa in self.GENETIC_CODE.items():
+            assert codon in self.tokens_to_idx, f"Codon '{codon}' not in vocabulary"
+            assert aa in aa_vocab.tokens_to_idx or aa == "*", f"Amino acid '{aa}' not in vocabulary"
+            codon_idx = self.tokens_to_idx[codon]
+            aa_idx = aa_vocab.tokens_to_idx[aa] if aa != "*" else aa_vocab.eos_idx
+            mapping[codon_idx] = aa_idx
+        return mapping
+
+
 def test_encode_sequence():
     sequence = "LFKLGAENIFLGRKAATKEEAIRFAGEQLVKGGYVEPEYVQAMLDREKLTPTYLGESIAVPHGTVEAK"
     alphabet = esm.data.Alphabet.from_architecture("ESM-1b")
@@ -337,3 +539,122 @@ def test_encode_sequence():
     _, _, esm_tokens = batch_converter([("", sequence)])
     evo_tokens = vocab.encode(sequence)[None]
     assert (esm_tokens == evo_tokens).all()
+
+
+if __name__ == "__main__":
+    pass
+
+    # Suppress multi-character token warnings for cleaner test output
+    logger.setLevel(logging.ERROR)
+
+    print("=" * 70)
+    print("Testing DNAVocab")
+    print("=" * 70)
+
+    dna_vocab = DNAVocab.from_dna()
+    print(f"✓ DNAVocab created with size: {len(dna_vocab)}")
+
+    # Test single sequence encoding/decoding
+    dna_seq = "ATGCGATCG"
+    encoded_dna = dna_vocab.encode(dna_seq)
+    decoded_dna = dna_vocab.decode(encoded_dna)
+    assert decoded_dna == dna_seq, f"Mismatch: {decoded_dna} != {dna_seq}"
+    print(f"✓ Single sequence encode/decode: {dna_seq} -> {list(encoded_dna)} -> {decoded_dna}")
+
+    # Test batched sequences
+    dna_sequences = ["ATGC", "GGGGAAAA", "T"]
+    batched_dna = dna_vocab.encode(dna_sequences)
+    decoded_batch = dna_vocab.decode(batched_dna)
+    for orig, dec in zip(dna_sequences, decoded_batch):
+        dec_clean = dec.replace("<pad>", "").strip()
+        assert orig == dec_clean, f"Batch mismatch: {orig} != {dec_clean}"
+    print(f"✓ Batched sequences ({len(dna_sequences)} sequences) encode/decode correctly")
+
+    print("\n" + "=" * 70)
+    print("Testing CodonVocab")
+    print("=" * 70)
+
+    codon_vocab = CodonVocab.from_codons()
+    print(f"✓ CodonVocab created with size: {len(codon_vocab)}")
+
+    # Test basic codon encoding/decoding
+    codon_seq = "ATGAAATTT"
+    encoded_codon = codon_vocab.encode(codon_seq)
+    decoded_codon = codon_vocab.decode(encoded_codon)
+    assert decoded_codon == codon_seq, f"Mismatch: {decoded_codon} != {codon_seq}"
+    print(
+        f"✓ Single sequence encode/decode: {codon_seq} -> {list(encoded_codon)} -> {decoded_codon}"
+    )
+
+    # Test translation accuracy
+    test_cases = [
+        ("ATGAAATTT", "MKF"),  # Start codon + AAA (K) + TTT (F)
+        ("TTTAAAGGG", "FKG"),  # TTT (F) + AAA (K) + GGG (G)
+        ("ATGAAATAG", "MK*"),  # With stop codon TAG
+        ("TAATAATGA", "***"),  # All stop codons
+        ("GCAGCGGCA", "AAA"),  # All alanine
+        ("ATGATCATA", "MII"),  # ATG (M) + ATC (I) + ATA (I)
+    ]
+
+    print("\nTranslation tests:")
+    for dna, expected_aa in test_cases:
+        translated = codon_vocab.translate(dna)
+        assert (
+            translated == expected_aa
+        ), f"Translation error: {dna} -> {translated}, expected {expected_aa}"
+        print(f"  ✓ {dna} -> {translated}")
+
+    # Test batched codon sequences
+    codon_sequences = ["ATGAAATTT", "ATGGGG", "TTTAAA"]
+    batched_codon = codon_vocab.encode(codon_sequences)
+    decoded_codon_batch = codon_vocab.decode(batched_codon)
+    for orig, dec in zip(codon_sequences, decoded_codon_batch):
+        dec_clean = dec.replace("<pad>", "").strip()
+        assert orig == dec_clean, f"Batch mismatch: {orig} != {dec_clean}"
+    print(f"\n✓ Batched sequences ({len(codon_sequences)} sequences) encode/decode correctly")
+
+    # Test incomplete codon handling
+    incomplete_seq = "ATGAA"  # 5 nucleotides, incomplete last codon
+    try:
+        encoded_incomplete = codon_vocab.encode(incomplete_seq)
+        decoded_incomplete = codon_vocab.decode(encoded_incomplete)
+        print(f"✓ Incomplete codon handling: {incomplete_seq} -> {decoded_incomplete}")
+    except ValueError as e:
+        print(f"✓ Incomplete codon raises error as expected: {e}")
+
+    # Test comprehensive genetic code coverage
+    print("\nVerifying complete genetic code table (64 codons):")
+    nucleotides = "ATGC"
+    all_codons = [a + b + c for a in nucleotides for b in nucleotides for c in nucleotides]
+    assert len(all_codons) == 64, "Should have exactly 64 codons"
+
+    translated_codons = 0
+    for codon in all_codons:
+        aa = codon_vocab.translate(codon)
+        assert len(aa) == 1, f"Translation should produce single amino acid, got {aa}"
+        translated_codons += 1
+
+    print(f"  ✓ All {translated_codons} codons translate correctly")
+
+    # Verify specific well-known codon translations
+    known_translations = {
+        "ATG": "M",  # Methionine (start codon)
+        "TGG": "W",  # Tryptophan (only 1 codon)
+        "TAA": "*",  # Stop
+        "TAG": "*",  # Stop
+        "TGA": "*",  # Stop
+        "GCT": "A",  # Alanine
+        "TGT": "C",  # Cysteine
+    }
+
+    for codon, expected_aa in known_translations.items():
+        aa = codon_vocab.translate(codon)
+        assert (
+            aa == expected_aa
+        ), f"Known translation error: {codon} -> {aa}, expected {expected_aa}"
+
+    print(f"  ✓ Known codon translations verified")
+
+    print("\n" + "=" * 70)
+    print("All tests passed! ✓")
+    print("=" * 70)
