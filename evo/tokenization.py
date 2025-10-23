@@ -529,7 +529,7 @@ class CodonVocab(Vocab):
             assert codon in self.tokens_to_idx, f"Codon '{codon}' not in vocabulary"
             assert aa in aa_vocab.tokens_to_idx or aa == "*", f"Amino acid '{aa}' not in vocabulary"
             codon_idx = self.tokens_to_idx[codon]
-            aa_idx = aa_vocab.tokens_to_idx[aa] if aa != "*" else aa_vocab.eos_idx
+            aa_idx = aa_vocab.tokens_to_idx[aa] if aa != "*" else aa_vocab.eos_idx  # map stop codons to the aa eos token
             mapping[codon_idx] = aa_idx
         return mapping
 
