@@ -1,12 +1,11 @@
 import re
-from typing import List, Tuple
 from itertools import product, zip_longest
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
-from Bio.Seq import Seq
 from Bio.Data import CodonTable
-
+from Bio.Seq import Seq
 
 _FASTA_VOCAB = "ARNDCQEGHILKMFPSTWYV"
 _AA_STR_SORTED = "ACDEFGHIKLMNPQRSTVWY"
@@ -99,11 +98,11 @@ for aa in set(forward_table.values()):
 
 
 def remove_spaces(seqs: List[str]) -> np.ndarray:
-    return np.array([''.join(s.strip().split(' ')) for s in seqs])
+    return np.array(["".join(s.strip().split(" ")) for s in seqs])
 
 
 def add_spaces(seqs: List[str]) -> np.ndarray:
-    return np.array([' '.join(list(s)) for s in seqs])
+    return np.array([" ".join(list(s)) for s in seqs])
 
 
 def single_substitution_names(sequence: str, vocab=_FASTA_VOCAB) -> List[str]:
@@ -162,7 +161,7 @@ def sort_mutation_names(mutant: str) -> str:
     if expression.search(mutant):
         mutants = expression.split(mutant)
         mutants = sorted(mutants, key=lambda x: int(x[1:-1]), reverse=True)
-        return ','.join(mutants)
+        return ",".join(mutants)
     return mutant
 
 
@@ -186,15 +185,17 @@ def make_mutation(sequence: str, mutant: str, start_ind: int = 1) -> str:
         wt, pos, mut = split_mutant_name(mutant)
         pos -= start_ind
         if pos < 0 or pos > len(sequence):
-            raise ValueError(f"Position {pos} out of bounds for sequence of length {len(sequence)}.")
-        if wt == "-":   # insertion
+            raise ValueError(
+                f"Position {pos} out of bounds for sequence of length {len(sequence)}."
+            )
+        if wt == "-":  # insertion
             return sequence[:pos] + mut + sequence[pos:]
         if mut == "-":  # deletion
             assert sequence[pos] == wt
-            return sequence[:pos] + sequence[pos + 1:]
-        else:           # substitution
+            return sequence[:pos] + sequence[pos + 1 :]
+        else:  # substitution
             assert sequence[pos] == wt
-            return sequence[:pos] + mut + sequence[pos + 1:]
+            return sequence[:pos] + mut + sequence[pos + 1 :]
 
 
 def create_mutant_df(sequence: str, subs_only=False) -> pd.DataFrame:
@@ -227,9 +228,7 @@ def to_pivoted_mutant_df(df: pd.DataFrame) -> pd.DataFrame:
     df["wt_aa"] = df["mutant"].str.get(0)
     df["mut_aa"] = df["mutant"].str.get(-1)
     df["Position"] = df["mutant"].str.slice(1, -1).astype(int)
-    df = df.drop(columns="mutant").pivot(
-        index="mut_aa", columns=["Position", "wt_aa"]
-    )
+    df = df.drop(columns="mutant").pivot(index="mut_aa", columns=["Position", "wt_aa"])
     df = df.loc[list(_FASTA_VOCAB)]
     return df
 
@@ -258,9 +257,7 @@ def translate_codon(codon):
 def translate_sequence(nt_sequence):
     if len(nt_sequence) % 3 != 0:
         raise ValueError(f"The sequence '{nt_sequence}' is not a multiple of 3.")
-    aa_seq = "".join(
-        translate_codon(nt_sequence[i : i + 3]) for i in range(0, len(nt_sequence), 3)
-    )
+    aa_seq = "".join(translate_codon(nt_sequence[i : i + 3]) for i in range(0, len(nt_sequence), 3))
     if "*" in aa_seq:
         raise ValueError(f"The sequence '{nt_sequence}' contains a stop codon.")
     return aa_seq
@@ -282,27 +279,8 @@ def backtranslate(aa_sequence: str) -> str:
     return "".join(PREFERRED_CODONS[aa] for aa in aa_sequence.upper())
 
 
-def backtranslate_with_v_gene(aa_sequence: str, v_gene_seq: str) -> str:
-    """Backtranslate protein sequence using V gene sequence where possible."""
-    # Truncate v_gene_seq to codon boundary and translate
-    v_gene_seq = v_gene_seq[: len(v_gene_seq) - len(v_gene_seq) % 3]
-    v_gene_aa = translate_sequence(v_gene_seq)
-    consensus_popular_nt = backtranslate(aa_sequence)
-
-    result = ""
-    for i, aa in enumerate(aa_sequence):
-        if i < len(v_gene_aa) and aa == v_gene_aa[i]:
-            result += v_gene_seq[i * 3 : i * 3 + 3]
-        else:
-            result += consensus_popular_nt[i * 3 : i * 3 + 3]
-
-    assert translate_sequence(result) == aa_sequence
-    return result
-
-
 # Example usage:
 if __name__ == "__main__":
-    
     # Write a simple test to make sure that create_mutant_df() works as expected
     sequence = "ACDEFGHIKLMNPQRSTVWY"
     df = create_mutant_df(sequence)

@@ -183,6 +183,9 @@ class Vocab(object):
         else:
             raise ValueError("Too many dimensions!")
 
+    def is_eos(self, index: int) -> bool:
+        return index == self.eos_idx
+
     @classmethod
     def from_esm_alphabet(cls, alphabet: esm.data.Alphabet) -> "Vocab":
         return cls(

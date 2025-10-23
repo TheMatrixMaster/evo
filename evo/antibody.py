@@ -1,21 +1,41 @@
 from typing import List
+
 from abnumber import Chain
 
-from .sequence import remove_spaces
+from .sequence import backtranslate, remove_spaces, translate_sequence
 
-
-# V Gene sequences
+# V and J Gene sequences for Koenig et al.
 IGHV3_23_04_SEQ = """GAGGTGCAGCTGGTGGAGTCTGGGGGAGGCTTGGTACAGCCTGGGGGGTCCCTGAGACTCTCCTGTGCAGCCTCTGGATTCACCTTTAGCAGCTATGCCATGAGCTGGGTCCGCCAGGCTCCAGGGAAGGGGCTGGAGTGGGTCTCAGCTATTAGTGGTAGTGGTGGTAGCACATACTACGCAGACTCCGTGAAGGGCCGGTTCACCATCTCCAGAGACAATTCCAAGAACACGCTGTATCTGCAAATGAACAGCCTGAGAGCCGAGGACACGGCCGTATATTACTGTGCGAAAGA"""
 IGKV1_39_01_SEQ = """GACATCCAGATGACCCAGTCTCCATCCTCCCTGTCTGCATCTGTAGGAGACAGAGTCACCATCACTTGCCGGGCAAGTCAGAGCATTAGCAGCTATTTAAATTGGTATCAGCAGAAACCAGGGAAAGCCCCTAAGCTCCTGATCTATGCTGCATCCAGTTTGCAAAGTGGGGTCCCATCAAGGTTCAGTGGCAGTGGATCTGGGACAGATTTCACTCTCACCATCAGCAGTCTGCAACCTGAAGATTTTGCAACTTACTACTGTCAACAGAGTTACAGTACCCCTCC"""
 
+# Aakarsh obtained consensus sequence (ask how...)
+KOENIG_IGH_CON_SEQ = """GAGGTGCAGCTGGTGGAGTCTGGGGGAGGCTTGGTACAGCCTGGGGGGTCCCTGAGACTCTCCTGTGCAGCCTCTGGATTCACCATTAGCGACTATTGGATACACTGGGTCCGCCAGGCTCCAGGGAAGGGGCTGGAGTGGGTCGCAGGTATTACTCCTGCTGGTGGTTACACATACTACGCAGACTCCGTGAAGGGCCGGTTCACCATCTCCGCAGACACTTCCAAGAACACGGCGTATCTGCAAATGAACAGCCTGAGAGCCGAGGACACGGCCGTATATTACTGTGCGAGATTCGTGTTCTTCCTGCCCTACGCCATGGACTACTGGGGCCAGGGAACCCTGGTCACCGTCTCCTCA"""
+KOENIG_IGK_CON_SEQ = """GACATCCAGATGACCCAGTCTCCATCCTCCCTGTCTGCATCTGTAGGAGACAGAGTCACCATCACTTGCCGGGCAAGTCAGGACGTGAGCACCGCCGTGGCCTGGTATCAGCAGAAACCAGGGAAAGCCCCTAAGCTCCTGATCTATAGCGCATCCTTCTTGTACAGTGGGGTCCCATCAAGGTTCAGTGGCAGTGGATCTGGGACAGATTTCACTCTCACCATCAGCAGTCTGCAACCTGAAGATTTTGCAACTTACTACTGTCAACAGAGTTACACCACCCCTCCCACCTTCGGCCAGGGCACCAAGGTGGAGATCAAGAGA"""
+
 
 def get_cdr(seq: str) -> List[str]:
-    cdrs = Chain(remove_spaces([seq])[0], scheme='imgt')
+    cdrs = Chain(remove_spaces([seq])[0], scheme="imgt")
     return [cdrs.cdr1_seq, cdrs.cdr2_seq, cdrs.cdr3_seq]
 
 
 def get_frs(seq: str) -> List[str]:
-    frs = Chain(remove_spaces([seq])[0], scheme='imgt')
+    frs = Chain(remove_spaces([seq])[0], scheme="imgt")
     return [frs.fr1_seq, frs.fr2_seq, frs.fr3_seq, frs.fr4_seq]
 
 
+def backtranslate_with_v_gene(aa_sequence: str, v_gene_seq: str) -> str:
+    """Backtranslate protein sequence using V gene sequence where possible."""
+    # Truncate v_gene_seq to codon boundary and translate
+    v_gene_seq = v_gene_seq[: len(v_gene_seq) - len(v_gene_seq) % 3]
+    v_gene_aa = translate_sequence(v_gene_seq)
+    consensus_popular_nt = backtranslate(aa_sequence)
+
+    result = ""
+    for i, aa in enumerate(aa_sequence):
+        if i < len(v_gene_aa) and aa == v_gene_aa[i]:
+            result += v_gene_seq[i * 3 : i * 3 + 3]
+        else:
+            result += consensus_popular_nt[i * 3 : i * 3 + 3]
+
+    assert translate_sequence(result) == aa_sequence
+    return result
