@@ -117,6 +117,15 @@ class Vocab(object):
             constant_values=[(self.bos_idx, self.eos_idx)],
         )
 
+    def rm_special_tokens(self, array: np.ndarray) -> np.ndarray:
+        if self.prepend_bos and array[0] == self.bos_idx:
+            array = array[1:]
+        if self.append_eos:
+            eos_pos = np.where(array == self.eos_idx)[0]
+            if len(eos_pos) > 0:
+                array = array[: eos_pos[0]]
+        return array
+
     def encode_array(self, array: np.ndarray) -> np.ndarray:
         return self.add_special_tokens(self._convert_uint8_array(array))
 
@@ -135,7 +144,7 @@ class Vocab(object):
         return indices
 
     def decode_single_sequence(self, array: np.ndarray) -> str:
-        array = array[int(self.prepend_bos) : len(array) - int(self.append_eos)]
+        array = self.rm_special_tokens(array)
         return "".join(self.token(idx) for idx in array)
 
     def encode(
@@ -529,7 +538,9 @@ class CodonVocab(Vocab):
             assert codon in self.tokens_to_idx, f"Codon '{codon}' not in vocabulary"
             assert aa in aa_vocab.tokens_to_idx or aa == "*", f"Amino acid '{aa}' not in vocabulary"
             codon_idx = self.tokens_to_idx[codon]
-            aa_idx = aa_vocab.tokens_to_idx[aa] if aa != "*" else aa_vocab.eos_idx  # map stop codons to the aa eos token
+            aa_idx = (
+                aa_vocab.tokens_to_idx[aa] if aa != "*" else aa_vocab.eos_idx
+            )  # map stop codons to the aa eos token
             mapping[codon_idx] = aa_idx
         return mapping
 
