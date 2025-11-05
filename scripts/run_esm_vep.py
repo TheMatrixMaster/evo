@@ -1,18 +1,20 @@
-import esm
-from pathlib import Path
 import argparse
 from functools import reduce
-import torch
+from pathlib import Path
+
+import esm
 import pandas as pd
-from evo.tokenization import Vocab
-from evo.parsing import read_first_sequence
+import torch
+
 from evo.align import MSA
 from evo.likelihood import sequence_mutant_scores
+from evo.parsing import read_first_sequence
 from evo.tensor import numpy_seed
+from evo.tokenization import Vocab
 
 
 @torch.no_grad()
-def score_single_sequence(sequence: str, max_tokens: int = 2 ** 14) -> pd.DataFrame:
+def score_single_sequence(sequence: str, max_tokens: int = 2**14) -> pd.DataFrame:
     outputs = []
     for i in range(1, 6):
         model_name = f"esm1v_t33_650M_UR90S_{i}"
@@ -32,7 +34,7 @@ def score_single_sequence(sequence: str, max_tokens: int = 2 ** 14) -> pd.DataFr
 
 
 @torch.no_grad()
-def score_msa(msa: MSA, max_tokens: int = 2 ** 14) -> pd.DataFrame:
+def score_msa(msa: MSA, max_tokens: int = 2**14) -> pd.DataFrame:
     outputs = []
     model, alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
     vocab = Vocab.from_esm_alphabet(alphabet)
@@ -61,10 +63,8 @@ if __name__ == "__main__":
         "-i", "--infile", required=True, type=Path, help="Path to fasta or a3m file"
     )
     parser.add_argument("--method", choices=["single", "msa", "both"], default="single")
-    parser.add_argument(
-        "-o", "--outdir", required=True, type=Path, help="Path to output directory"
-    )
-    parser.add_argument("--max_tokens", type=int, default=2 ** 14, help="Max tokens per GPU")
+    parser.add_argument("-o", "--outdir", required=True, type=Path, help="Path to output directory")
+    parser.add_argument("--max_tokens", type=int, default=2**14, help="Max tokens per GPU")
     args = parser.parse_args()
 
     run_single = args.method in ("single", "both")
