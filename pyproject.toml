@@ -27,6 +27,7 @@ dependencies = [
     "rootutils",
     "abnumber>=0.4.4",
     "pre-commit>=4.2.0",
+    "netam>=0.2.1",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +41,9 @@ dev-dependencies = [
     "pre-commit>=3.5.0",
     "pytest>=7.4.2",
 ]
+
+[tool.uv.sources]
+netam = { git = "https://github.com/matsengrp/netam.git" }
 
 [tool.black]
 line-length = 100
