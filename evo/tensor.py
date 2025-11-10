@@ -1,6 +1,6 @@
 import contextlib
 import functools
-from typing import Callable, Generator, Optional, Sequence, Tuple, TypeVar, List
+from typing import Callable, Generator, List, Optional, Sequence, Tuple, TypeVar
 
 import numpy as np
 import torch
@@ -76,14 +76,19 @@ def recursive_make_numpy(item):
         return item
 
 
-def collate_tensors(sequences: Sequence[TensorLike], constant_value=0, dtype=None) -> TensorLike:
+def collate_tensors(
+    sequences: Sequence[TensorLike], constant_value=0, dtype=None, max_len=None
+) -> TensorLike:
     sequences = [seq for seq in sequences if seq is not None]
 
     batch_size = len(sequences)
     if batch_size == 0:
         return None
-    
-    shape = [batch_size] + np.max([seq.shape for seq in sequences], 0).tolist()
+
+    if max_len is not None:
+        shape = [batch_size, max_len]
+    else:
+        shape = [batch_size] + np.max([seq.shape for seq in sequences], 0).tolist()
 
     if dtype is None:
         dtype = sequences[0].dtype
@@ -104,6 +109,8 @@ def collate_list_of_dicts(
     sequences: Sequence[dict],
     batch_keys: Sequence[str],
     constant_value=0,
+    *args,
+    **kwargs,
 ) -> dict:
     col_batch = {}
     for key in batch_keys:
@@ -111,7 +118,7 @@ def collate_list_of_dicts(
             col_batch[key] = torch.tensor([item[key] for item in sequences])
         elif isinstance(sequences[0][key], (np.ndarray, torch.Tensor)):
             col_batch[key] = collate_tensors(
-                [item[key] for item in sequences], constant_value=constant_value
+                [item[key] for item in sequences], constant_value=constant_value, *args, **kwargs
             )
         else:
             col_batch[key] = [item[key] for item in sequences]
@@ -126,7 +133,12 @@ def mask_tensor(
     leave_unmasked_prob: float = 0.1,
     extra_special_tok_idx: List[int] = [],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    special_tokens = [vocab.bos_idx, vocab.eos_idx, vocab.pad_idx, vocab.mask_idx] + extra_special_tok_idx
+    special_tokens = [
+        vocab.bos_idx,
+        vocab.eos_idx,
+        vocab.pad_idx,
+        vocab.mask_idx,
+    ] + extra_special_tok_idx
     special_tokens = torch.Tensor(special_tokens).to(x.device).to(x.dtype)
     keep_mask = torch.isin(x, special_tokens)
     random_probs = torch.rand_like(x, dtype=torch.float)
