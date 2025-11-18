@@ -1,4 +1,6 @@
-from typing import List
+import subprocess
+from pathlib import Path
+from typing import List, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -103,3 +105,134 @@ def df_to_ete3_tree(df: pd.DataFrame) -> Tree:
     # But typically, once you have 'tree' as a Tree object, you can simply
     # use `tree.write(format=3)` or pass format=3 when you want to export.
     return tree
+
+
+# R script that reads newick from stdin or file, outputs CSV to stdout
+R_SCRIPT = """
+library(ape)
+args <- commandArgs(trailingOnly = TRUE)
+
+# Read tree from file or stdin
+if (length(args) > 0 && args[1] != "-") {
+    tree <- read.tree(args[1])
+} else {
+    tree <- read.tree(file("stdin"))
+}
+
+# Compute all pairwise node distances
+dist <- dist.nodes(tree)
+
+# Get node labels
+n_tips <- length(tree$tip.label)
+n_internal <- tree$Nnode
+
+if (is.null(tree$node.label) || all(tree$node.label == "")) {
+    internal_labels <- paste0("internal_", seq_len(n_internal) - 1)
+} else {
+    internal_labels <- tree$node.label
+    empty_idx <- which(internal_labels == "" | is.na(internal_labels))
+    internal_labels[empty_idx] <- paste0("internal_", empty_idx - 1)
+}
+
+all_labels <- c(tree$tip.label, internal_labels)
+rownames(dist) <- all_labels
+colnames(dist) <- all_labels
+
+# Write to stdout
+write.csv(dist, file = stdout(), quote = FALSE)
+"""
+
+
+def get_patristic_distances(
+    newick_input: Union[str, Path],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute patristic distance matrix for all nodes (tips + internal).
+
+    Uses R's ape::dist.nodes() - transfers data via stdout (no temp files for output).
+
+    Parameters
+    ----------
+    newick_input : str or Path
+        Newick string or path to Newick file.
+
+    Returns
+    -------
+    distances : np.ndarray
+        Symmetric matrix of pairwise patristic distances.
+    labels : np.ndarray
+        Node labels in matrix order (tips first, then internal nodes).
+
+    Examples
+    --------
+    >>> newick = "((A:0.1,B:0.2)AB:0.3,(C:0.4,D:0.5)CD:0.6)root;"
+    >>> dist, labels = get_patristic_distances(newick)
+    >>> i, j = np.where(labels == 'A')[0][0], np.where(labels == 'B')[0][0]
+    >>> print(f"Distance A-B: {dist[i,j]}")  # 0.3
+    """
+    newick_str = str(newick_input)
+    is_file = Path(newick_str).is_file()
+
+    # Build R command
+    if is_file:
+        # Pass file path as argument
+        cmd = ["Rscript", "-e", R_SCRIPT, newick_str]
+        stdin_data = None
+    else:
+        # Pass newick string via stdin
+        cmd = ["Rscript", "-e", R_SCRIPT, "-"]
+        stdin_data = newick_str
+
+    # Run R
+    try:
+        result = subprocess.run(cmd, input=stdin_data, capture_output=True, text=True, check=True)
+    except FileNotFoundError:
+        raise RuntimeError("Rscript not found. Install R and ensure it's in your PATH.")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"R failed:\n{e.stderr}")
+
+    # Parse CSV from stdout
+    lines = result.stdout.strip().split("\n")
+
+    # First line is header with labels
+    header = lines[0].split(",")[1:]  # Skip empty first column
+    labels = np.array([label.strip('"') for label in header])
+
+    # Remaining lines are data
+    n = len(labels)
+    distances = np.zeros((n, n), dtype=np.float64)
+
+    for i, line in enumerate(lines[1:]):
+        values = line.split(",")[1:]  # Skip row label
+        distances[i] = [float(v) for v in values]
+
+    return distances, labels
+
+
+def get_distance(newick_input: Union[str, Path], node1: str, node2: str) -> float:
+    """
+    Get patristic distance between two specific nodes.
+
+    Parameters
+    ----------
+    newick_input : str or Path
+        Newick string or path to Newick file.
+    node1, node2 : str
+        Node names.
+
+    Returns
+    -------
+    distance : float
+        Patristic distance between the two nodes.
+    """
+    distances, labels = get_patristic_distances(newick_input)
+
+    idx1 = np.where(labels == node1)[0]
+    idx2 = np.where(labels == node2)[0]
+
+    if len(idx1) == 0:
+        raise ValueError(f"Node '{node1}' not found. Available: {labels.tolist()}")
+    if len(idx2) == 0:
+        raise ValueError(f"Node '{node2}' not found. Available: {labels.tolist()}")
+
+    return distances[idx1[0], idx2[0]]

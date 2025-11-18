@@ -1,6 +1,9 @@
+import copy
 import math
+import random
 import subprocess
 import threading
+from collections import defaultdict
 from operator import methodcaller
 from pathlib import Path
 from typing import (
@@ -360,6 +363,138 @@ class EncodedMSADataset(CollatableVocabDataset, MSADataset):
 
     def __getitem__(self, idx):
         return torch.from_numpy(self.vocab.encode(super().__getitem__(idx)))
+
+
+class PhyloDataset(torch.utils.data.Dataset):
+    """Creates a dataset from a directory of paired fasta + npy files.
+    Args:
+        data_dir (Union[str, Path]): Path to directory of fasta + npy files. Each fasta file should have a corresponding npy file with the same name (but .npy extension).
+        split_files (Optional[Collection[str]]): Subset of files to use,
+            can be used to specify training / validation / testing sets.
+        max_seqs_per_phylo (Optional[int]): Maximum number of sequences per phylo tree in a sample. If None, uses all sequences.
+        sample_method (str): Method to sample subtrees from the phylo tree. Options are 'random' (randomly sample a subtree) or 'path' (sample a path from root to leaf). Default is 'random'.
+    """
+
+    def __init__(
+        self,
+        data_dir: PathLike,
+        split_files: Optional[Collection[str]] = None,
+        max_seqs_per_phylo: Optional[int] = None,
+        sample_method: str = "random",
+    ):
+        assert sample_method in ("random", "path")
+        data_dir = Path(data_dir)
+        if not data_dir.exists():
+            raise FileNotFoundError(data_dir)
+        if not data_dir.is_dir():
+            raise NotADirectoryError(data_dir)
+
+        file_glob = data_dir.glob("*.fasta")
+        if split_files is None:
+            file_list = list(file_glob)
+        else:
+            split_files = set(split_files)
+            if len(split_files) == 0:
+                raise ValueError("Passed an empty split file set")
+
+            file_list = [f for f in file_glob if f.stem in split_files]
+            if len(file_list) != len(split_files):
+                num_missing = len(split_files) - len(file_list)
+                raise FileNotFoundError(
+                    f"{num_missing} specified split files not found in directory"
+                )
+
+        if len(file_list) == 0:
+            raise FileNotFoundError(f"No .fasta files found in {data_dir}")
+
+        pdm_file_list = [f.with_suffix(".npy") for f in file_list]
+        for f in pdm_file_list:
+            if not f.exists():
+                raise FileNotFoundError(f"Missing corresponding .npy file for {f.stem}")
+
+        if max_seqs_per_phylo is not None:
+            assert max_seqs_per_phylo > 1, "max_seqs_per_phylo must be greater than 1 or None"
+
+        self._file_list = sorted(file_list)
+        self.keys = {f.stem: i for i, f in enumerate(self._file_list)}
+        self._max_seqs_per_phylo = max_seqs_per_phylo
+        self._sample_method = sample_method
+
+        # Pre-compute sequence counts for efficient batch sampling
+        self.seq_counts = self._compute_seq_counts()
+
+    def get(self, key: str):
+        index = self.keys[key]
+        return self[index]
+
+    def key(self, index: int) -> str:
+        return self._file_list[index].stem
+
+    def _compute_seq_counts(self) -> np.ndarray:
+        """Efficiently compute sequence counts for all phylos by counting fasta headers."""
+        counts = []
+        for fasta_file in self._file_list:
+            count = 0
+            with open(fasta_file) as f:
+                for line in f:
+                    if line.startswith(">"):
+                        count += 1
+            counts.append(count)
+        return np.array(counts, dtype=np.int32)
+
+    def read_phylo(self, index: int) -> Tuple[Dict[str, SeqIO.SeqRecord], np.ndarray]:
+        fasta_file = self._file_list[index]
+        pdm_file = fasta_file.with_suffix(".npy")
+        sequences = SeqIO.to_dict(SeqIO.parse(fasta_file, "fasta"))
+        pdm: np.ndarray = np.load(pdm_file)
+        assert (
+            len(sequences) == pdm.shape[0]
+        ), f"Number of sequences in {fasta_file} does not match size of PDM in {pdm_file}"
+        assert pdm.shape[0] == pdm.shape[1], f"PDM in {pdm_file} must be square"
+        assert pdm.diagonal().sum() == 0, f"PDM in {pdm_file} must have zeros on the diagonal"
+        return sequences, pdm
+
+    def select_subtree(
+        self, sequences: Dict[str, SeqIO.SeqRecord], pdm: np.ndarray
+    ) -> Tuple[Dict[str, SeqIO.SeqRecord], np.ndarray]:
+        if self._sample_method == "random":
+            indices = np.random.choice(len(sequences), size=self._max_seqs_per_phylo, replace=False)
+        elif self._sample_method == "path":
+            raise NotImplementedError("Path sampling method not implemented yet")
+        sequences = {k: v for i, (k, v) in enumerate(sequences.items()) if i in indices}
+        pdm = pdm[np.ix_(indices, indices)]
+        return sequences, pdm
+
+    def __len__(self) -> int:
+        return len(self._file_list)
+
+    def __getitem__(self, index: int, seq_slice=None):
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+
+        seqs, pdm = self.read_phylo(index)
+
+        # Handle sequence indexing (for PhyloSampler)
+        if seq_slice is not None:
+            seq_list = list(seqs.items())
+
+            # Handle both slice objects and index arrays/lists
+            if isinstance(seq_slice, slice):
+                sliced_items = seq_list[seq_slice]
+                indices = list(range(len(seq_list)))[seq_slice]
+            else:
+                # seq_slice is an array or list of indices
+                indices = np.asarray(seq_slice, dtype=np.int64)
+                sliced_items = [seq_list[i] for i in indices]
+
+            seqs = dict(sliced_items)
+            pdm = pdm[np.ix_(indices, indices)]
+
+        # Handle max_seqs_per_phylo (random subsampling)
+        elif self._max_seqs_per_phylo is not None and len(seqs) > self._max_seqs_per_phylo:
+            seqs, pdm = self.select_subtree(sequences=seqs, pdm=pdm)
+
+        return seqs, pdm
 
 
 class ParquetDataset(torch.utils.data.Dataset):
@@ -827,6 +962,60 @@ class BatchBySequenceLength(torch.utils.data.Sampler):
             epoch (int): Epoch number.
         """
         self.epoch = epoch
+
+
+class RandomIdentitySampler(torch.utils.data.Sampler):
+    """Randomly samples N identities each with K instances.
+
+    Args:
+        pids (List[int]): List of group IDs for each instance in the dataset.
+        batch_size (int): batch size.
+        max_num_instances (int): Maximum number of instances per identity in a batch.
+    """
+
+    def __init__(self, pids: List[int], batch_size: int, max_num_instances: int):
+        if batch_size < max_num_instances:
+            print(
+                "Warning: batch_size is smaller than max_num_instances, so max_num_instances will be set to batch_size."
+            )
+            max_num_instances = batch_size
+
+        self.batch_size = batch_size
+        self.max_num_instances = max_num_instances
+        self.index_dic = defaultdict(list)
+
+        for index, pid in enumerate(pids):
+            self.index_dic[pid].append(index)
+
+        self.pids = list(self.index_dic.keys())
+        self.length = len(self.pids)
+
+    def __iter__(self):
+        batch_idxs_dict = defaultdict(list)
+
+        for pid in self.pids:
+            idxs = copy.deepcopy(self.index_dic[pid])
+            random.shuffle(idxs)
+
+            # iterate over idxs in chunks of size max_num_instances
+            for i in range(0, len(idxs), self.max_num_instances):
+                batch_idxs_dict[pid].append(idxs[i : i + self.max_num_instances])
+
+        avai_pids = copy.deepcopy(self.pids)
+        random.shuffle(avai_pids)
+        final_idxs = []
+
+        while len(avai_pids) > 0:
+            pid = avai_pids[0]
+            batch_idxs = batch_idxs_dict[pid].pop(0)
+            final_idxs.extend(batch_idxs)
+            if len(batch_idxs_dict[pid]) == 0:
+                avai_pids.remove(pid)
+
+        return iter(final_idxs)
+
+    def __len__(self):
+        return self.length
 
 
 class RandomCropDataset(BaseWrapperDataset):
