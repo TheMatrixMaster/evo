@@ -52,7 +52,7 @@ def get_quantile_idx(quantiles: List[float], t: float) -> int:
 VALID_BINS = np.array([float(f) for f in get_quantization_points_from_geometric_grid()])
 
 
-def df_to_ete3_tree(df: pd.DataFrame) -> Tree:
+def df_to_ete3_tree(df: pd.DataFrame, _root_name: str = None) -> Tree:
     """
     Convert a dataframe of edges (parent_name, child_name, branch_length)
     into an ete3 Tree object in 'format=3'.
@@ -92,8 +92,15 @@ def df_to_ete3_tree(df: pd.DataFrame) -> Tree:
     all_children = set(parent_of.keys())
     root_candidates = all_nodes - all_children
     if len(root_candidates) != 1:
-        raise ValueError(f"Expected exactly 1 root, found: {root_candidates}")
-    root_name = root_candidates.pop()
+        if _root_name is None:
+            raise ValueError(f"Expected exactly 1 root, found: {root_candidates}")
+        if _root_name not in root_candidates:
+            raise ValueError(
+                f"Specified root '{_root_name}' not found among candidates: {root_candidates}"
+            )
+        root_name = _root_name
+    else:
+        root_name = root_candidates.pop()
 
     # Return the root as an ete3 Tree
     # By construction, nodes[root_name] is now the root and has all children below it
