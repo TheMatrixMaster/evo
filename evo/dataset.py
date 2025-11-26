@@ -454,6 +454,10 @@ class PhyloDataset(torch.utils.data.Dataset):
         assert pdm.diagonal().sum() == 0, f"PDM in {pdm_file} must have zeros on the diagonal"
         return sequences, pdm
 
+    def tree_size(self, index: int) -> int:
+        # return number of sequences in the phylo tree at index
+        return self.seq_counts[index]
+
     def select_subtree(
         self, sequences: Dict[str, SeqIO.SeqRecord], pdm: np.ndarray
     ) -> Tuple[Dict[str, SeqIO.SeqRecord], np.ndarray]:
