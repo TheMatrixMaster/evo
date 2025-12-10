@@ -6,6 +6,7 @@ import threading
 from collections import defaultdict
 from operator import methodcaller
 from pathlib import Path
+from tqdm import tqdm
 from typing import (
     Any,
     Callable,
@@ -559,6 +560,7 @@ class CherriesDataset(torch.utils.data.Dataset):
         data_file: PathLike,
         cache_indices: bool = False,
         min_t: float = 5e-3,
+        max_len: Optional[int] = None,
         quantize_t: bool = False,
     ):
         self.data_file = Path(data_file)
@@ -568,6 +570,7 @@ class CherriesDataset(torch.utils.data.Dataset):
         self.cache = Path(f"{data_file}.idx.npy")
 
         self.min_t = min_t
+        self.max_len = max_len
         self.quantize_t = quantize_t
         self.time_bins = np.array(get_quantization_points_from_geometric_grid(), dtype=np.float32)
 
@@ -597,6 +600,9 @@ class CherriesDataset(torch.utils.data.Dataset):
             t = max(t, self.min_t)
         if self.quantize_t:
             t = get_quantile_idx(self.time_bins, t)
+        if self.max_len is not None:
+            seq1 = seq1[: self.max_len]
+            seq2 = seq2[: self.max_len]
         return seq1, seq2, t
 
     def __len__(self):
@@ -657,6 +663,52 @@ class ComplexCherriesDataset(CherriesDataset):
                 ts[i] = get_quantile_idx(self.time_bins, ts[i]) if self.quantize_t else ts[i]
 
         return xs, ys, ts, chain_ids
+
+
+class ComplexCherriesCollection(torch.utils.data.ConcatDataset):
+    """Concatenation of multiple ComplexCherriesDataset from different files.
+    """
+    def __init__(
+        self,
+        data_dir: PathLike,
+        file_ext: str = "txt",
+        split_files: Optional[Collection[str]] = None,
+        split_file: Optional[str] = None,
+        sep_token: str = ".",
+        chain_id_offset: int = 1,
+        *args,
+        **kwargs,
+    ):
+        data_dir = Path(data_dir)
+        if not data_dir.exists():
+            raise FileNotFoundError(data_dir)
+        if not data_dir.is_dir():
+            raise NotADirectoryError(data_dir)
+        file_glob = data_dir.glob(f"*.{file_ext}")
+        
+        if split_files is None and split_file is not None:
+            with open(split_file, "r") as f:
+                split_files = set(line.strip() for line in f if line.strip())
+
+        data_files = list(file_glob)
+        if split_files is not None:
+            split_files = set(split_files)
+            data_files = [f for f in file_glob if f.stem in split_files]
+            print(f"Using {len(data_files)} files from split.")
+        else:
+            print(f"Using all {len(data_files)} files in directory.")
+
+        datasets = [
+            ComplexCherriesDataset(
+                data_file=f,
+                sep_token=sep_token,
+                chain_id_offset=chain_id_offset,
+                *args,
+                **kwargs,
+            )
+            for f in tqdm(data_files, desc="Loading ComplexCherriesDatasets")
+        ]
+        super().__init__(datasets)
 
 
 class FastaDataset(SizedDataset):
