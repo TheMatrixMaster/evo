@@ -689,7 +689,7 @@ class ComplexCherriesCollection(torch.utils.data.ConcatDataset):
         if split_files is None and split_file is not None:
             with open(split_file, "r") as f:
                 split_files = set(line.strip() for line in f if line.strip())
-
+        
         data_files = list(file_glob)
         if split_files is not None:
             split_files = set(split_files)
@@ -698,6 +698,7 @@ class ComplexCherriesCollection(torch.utils.data.ConcatDataset):
         else:
             print(f"Using all {len(data_files)} files in directory.")
 
+        self.family_ids = [f.stem for f in data_files]
         datasets = [
             ComplexCherriesDataset(
                 data_file=f,

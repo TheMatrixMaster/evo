@@ -1,8 +1,11 @@
 import gc
-from multiprocessing import cpu_count, get_context
+from multiprocessing import cpu_count, get_context, Pool
 from typing import Dict, List, Optional
 
+from tqdm import tqdm
 import numpy as np
+import pandas as pd
+from anarci import anarci
 from abnumber import Chain
 
 from .sequence import backtranslate, remove_spaces, translate_sequence
@@ -27,42 +30,31 @@ def get_frs(seq: str) -> List[str]:
 
 
 def create_region_masks(sequence: str, scheme="imgt") -> Dict[str, np.ndarray]:
-    """Create boolean masks (numpy arrays) for antibody regions.
-
-    Returns a dict mapping region names to numpy boolean arrays of length equal to
-    the sequence (True where the residue belongs to that region).
-    """
+    """Create boolean masks for antibody regions matching original sequence length."""
     seq = remove_spaces([sequence])[0]
-
-    # try:
     chain = Chain(seq, scheme=scheme)
-    # except Exception as e:
-    #     print(f"Error parsing sequence with Chain: {e}. Attempting multiple_domains.")
-    #     chains = Chain.multiple_domains(seq, scheme=scheme)
-    #     chain = chains[0]
-
-    seq_len = len(chain)
-
-    # Define all region keys you want in the final output
+    
     region_keys = ["FR1", "CDR1", "FR2", "CDR2", "FR3", "CDR3", "FR4", "CDR_overall", "FR_overall"]
+    masks: Dict[str, np.ndarray] = {key: np.zeros(len(seq), dtype=bool) for key in region_keys}
 
-    # Initialize numpy boolean arrays
-    masks: Dict[str, np.ndarray] = {key: np.zeros(seq_len, dtype=bool) for key in region_keys}
+    # Find where chain sequence starts in original
+    offset = seq.find(str(chain.seq))
+    if offset == -1:
+        raise ValueError("Chain sequence not found in original")
 
-    # Iterate through the sequence positions one time and fill masks
-    for i, (pos_name, position) in enumerate(chain.positions.items()):
-        # region_name may be None for some position objects; guard against that
+    # Map chain positions to original sequence indices
+    for i, (pos_name, _) in enumerate(chain.positions.items()):
+        seq_idx = offset + i
         region_name = pos_name.get_region()
-
-        if region_name and region_name in masks:
-            masks[region_name][i] = True
-
-        # Use getattr to be robust if the Chain position object varies
+        
+        if region_name in masks:
+            masks[region_name][seq_idx] = True
+        
         if pos_name.is_in_cdr():
-            masks["CDR_overall"][i] = True
+            masks["CDR_overall"][seq_idx] = True
         else:
-            masks["FR_overall"][i] = True
-
+            masks["FR_overall"][seq_idx] = True
+    
     return masks
 
 
@@ -171,3 +163,162 @@ def backtranslate_with_v_gene(aa_sequence: str, v_gene_seq: str) -> str:
 
     assert translate_sequence(result) == aa_sequence
     return result
+
+
+def parse_anarci_output(anarci_result, scheme_length=149):
+    """
+    Parses the raw ANARCI output to construct a fixed-length AHo sequence.
+    
+    Args:
+        anarci_result: The tuple (numbering, alignment_details, hit_tables) for a SINGLE sequence.
+        scheme_length: AHo uses 149 positions.
+    
+    Returns:
+        A string of length 149 with the aligned sequence, or None if no domain found.
+    """
+    numbering, alignment_details, hit_tables = anarci_result
+
+    # numbering is a list of domains found. If empty, no antibody domain was found.
+    if not numbering:
+        return None
+
+    # We typically take the first domain found (index 0) which is the most significant V-domain
+    # domain_numbering is a list of tuples: ((pos_id, insertion_code), residue_char)
+    domain_numbering = numbering[0][0][0] 
+    
+    # Initialize a list of gaps
+    aligned_seq = ['-'] * scheme_length
+
+    # AHo numbering in ANARCI typically goes from 1 to 149.
+    # The 'pos_id' in ANARCI for AHo is the actual position number.
+    for (pos_id, insertion_code), residue in domain_numbering:
+        # AHo strictly shouldn't have insertion codes if used correctly for standard Ig,
+        # but ANARCI returns them in specific formats. 
+        # We assume standard integer positions for the AHo scaffolding.
+        
+        # Adjust 1-based index to 0-based index
+        index = pos_id - 1
+        
+        if 0 <= index < scheme_length:
+            aligned_seq[index] = residue
+            
+    return "".join(aligned_seq)
+
+
+def process_chunk(chunk_of_sequences):
+    """
+    Worker function to process a batch of sequences.
+    
+    Args:
+        chunk_of_sequences: List of tuples [('ID_1', 'SEQ_1'), ('ID_2', 'SEQ_2'), ...]
+        
+    Returns:
+        List of results: [('ID', 'ALIGNED_SEQ'), ...]
+    """
+    # Run ANARCI on the whole chunk at once (more efficient than 1 by 1)
+    # output=False prevents printing to stdout, returns python objects instead
+    results = anarci(chunk_of_sequences, scheme="aho", output=False, assign_germline=False)
+    
+    # Unpack results: results is a tuple (numbering_list, details_list, hit_list)
+    numbering_list, _, _ = results
+    
+    processed_data = []
+    
+    # Iterate through the original input sequences and match with results
+    for i, (seq_id, _) in enumerate(chunk_of_sequences):
+        # Extract the specific result for this sequence
+        # We reconstruct the tuple structure ANARCI would have returned for a single item
+        single_result = (
+            [numbering_list[i]] if numbering_list[i] else [], 
+            None, 
+            None
+        )
+        
+        aligned_seq = parse_anarci_output(single_result)
+        
+        if aligned_seq:
+            processed_data.append((seq_id, aligned_seq))
+        else:
+            # Handle cases where alignment failed (not an antibody or poor quality)
+            processed_data.append((seq_id, None))
+            
+    return processed_data
+
+
+def parallel_align_sequences(raw_sequences, n_jobs=None, chunk_size=100, verbose=False):
+    """
+    Parallel alignment with smooth, per-sequence progress tracking.
+    
+    Args:
+        raw_sequences: List of tuples [('ID', 'SEQ'), ...]
+        n_jobs: Number of cores (default: all - 1)
+        chunk_size: Number of sequences per worker batch. 
+                    Smaller = smoother progress bar but slightly more overhead.
+                    100-500 is usually a sweet spot for ANARCI.
+    Returns:
+        List of tuples [('ID', 'ALIGNED_SEQ'), ...] if input is a single sequence,
+        List of tuples [(('ID_1', 'ID_2'), 'ALIGNED_SEQ'), ...] if input is a paired sequence
+    """
+    if n_jobs is None:
+        n_jobs = max(1, cpu_count() - 1)
+    
+    # 1. Create many fixed-size chunks
+    # This ensures that workers report back frequently
+    chunks = [raw_sequences[i:i + chunk_size] for i in range(0, len(raw_sequences), chunk_size)]
+    
+    if verbose:
+        print(f"Aligning {len(raw_sequences)} sequences on {n_jobs} cores...")
+        print(f"Work split into {len(chunks)} batches (approx {chunk_size} seqs/batch).")
+    
+    results = []
+    
+    # 2. Setup the Pool and Progress Bar
+    # total=len(raw_sequences) lets the bar represent ACTUAL sequences, not chunks
+    pbar = tqdm(total=len(raw_sequences), unit="seq", desc="ANARCI Alignment")
+    
+    with Pool(processes=n_jobs) as pool:
+        # 3. Use imap_unordered
+        # imap_unordered yields results as soon as *any* worker finishes a batch.
+        # This prevents the progress bar from stalling if chunk #1 is slower than chunk #2.
+        for batch_result in pool.imap_unordered(process_chunk, chunks):
+            
+            # Aggregate results
+            results.extend(batch_result)
+            
+            # Update progress bar by the ACTUAL number of sequences in this batch
+            pbar.update(len(batch_result))
+            
+    pbar.close()
+    
+    return results
+
+
+# --- usage example ---
+if __name__ == "__main__":
+    # Example raw sequences (Heavy and Light)
+    # Note: AHo works for both Heavy and Light chains without changing parameters
+    raw_input = [
+        ("H_chain_1", "EVQLVESGGGLVQPGGSLRLSCAASGFTFSSYAMSWVRQAPGKGLEWVSAISGSGGSTYYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKDGYYYYGLDVWGQGTTVTVSS"),
+        ("L_chain_1", "DIQMTQSPSSLSASVGDRVTITCRASQGISNYLAWYQQKPGKVPKLLIYAASTLQSGVPSRFSGSGSGTDFTLTISSLQPEDVATYYCQKYNSAPLTFGGGTKVEIK"),
+        ("Trastuzumab_H", "EVQLVESGGGLVQPGGSLRLSCAASGFNIKDTYIHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCSRWGGDGFYAMDYWGQGTLVTVSS"),
+    ]
+
+    # Run alignment
+    aligned_data = parallel_align_sequences(raw_input)
+    
+    # Run alignment without parallelization
+    # aligned_data = process_chunk(raw_input)
+
+    # Display
+    print("\n--- Results ---")
+    for seq_id, seq_aho in aligned_data:
+        if seq_aho:
+            print(f">{seq_id}\n{seq_aho} (Length: {len(seq_aho)})")
+        else:
+            print(f">{seq_id}\nAlignment Failed")
+
+    # Optional: Convert to DataFrame for easy saving
+    df = pd.DataFrame(aligned_data, columns=['Id', 'AHo_Sequence'])
+    print(df.head())
+
+    breakpoint()

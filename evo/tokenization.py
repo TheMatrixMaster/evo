@@ -10,6 +10,7 @@ import torch
 import transformers
 
 from .align import MSA
+from .sequence import _AA_STR_SORTED
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,9 @@ class Vocab(object):
             [self.index(chr(tok)) for tok in self.uint8_symbols],
             dtype=np.int64,
         )
+
+    def standard_token_indices(self, standard_tokens=_AA_STR_SORTED) -> np.ndarray:
+        return np.array([self.index(t) for t in standard_tokens], dtype=np.int64)
 
     def index(self, token: str) -> int:
         return self.tokens_to_idx[token]

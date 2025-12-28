@@ -1,12 +1,18 @@
 import os
 from pathlib import Path
+from subprocess import Popen, PIPE
 from typing import List, Optional, Tuple, Union
 
 import torch
-from esm.esmfold.v1.pretrained import esmfold_v1
 from tqdm import tqdm
-
 from evo.dataset import FastaDataset
+
+try:
+    from esm.esmfold.v1.pretrained import esmfold_v1
+except ImportError as e:
+    print("ESMFold import failed. Make sure you have esm installed via `pip install fair-esm`.")
+    esmfold_v1 = None
+
 
 PathLike = Union[str, Path]
 DeviceLike = Union[str, torch.device]
@@ -15,6 +21,34 @@ DeviceLike = Union[str, torch.device]
 def ensure_exists(path):
     if not os.path.exists(path):
         os.makedirs(path)
+
+
+def run_omegafold(
+    input_fasta_file: PathLike,
+    output_structures_dir: PathLike,
+):
+    assert torch.cuda.is_available(), "You cannot generate OmegaFold structure predictions without CUDA!"
+    sequences_dir = os.path.dirname(input_fasta_file)
+    ensure_exists(output_structures_dir)
+    input_path = os.path.abspath(input_fasta_file)
+    output_structures_dir = os.path.abspath(output_structures_dir)
+
+    command = f"omegafold {input_path} {output_structures_dir}"
+    print(f"Running OmegaFold command: {command}")
+
+    process = Popen(command, shell=True, stdout=PIPE, stderr=PIPE)
+    stdout, stderr = process.communicate()
+
+    if process.returncode != 0:
+        print(f"Error running OmegaFold for {sequences_dir}")
+        print(stderr.decode())
+    else:
+        print(f"OmegaFold structure prediction completed for {sequences_dir}")
+
+    # Verify output exists and make read only
+    for file in os.listdir(output_structures_dir):
+        fpath = os.path.join(output_structures_dir, file)
+        os.chmod(fpath, mode=444)
 
 
 class FoldPipeline:
